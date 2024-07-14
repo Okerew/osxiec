@@ -43,7 +43,18 @@ sudo osxiec -execute {some_name}.bin
 ```sh
 sudo osxiec -execute {some_name} -port {PORT_NUMBER}
 ```
-
+**Create a cluster ( virtualized network )**
+```sh
+sudo osxiec -network create {network_name} {vlan_id}
+```
+**Run with vlan config**
+``` sh
+sudo osxiec -run {some_name} {network_name} -port {PORT_NUMBER}
+```
+**Version**
+```sh
+osxiec --version
+```
 ## Building
 **Git clone the repository**
 ``` sh
@@ -65,7 +76,7 @@ gcc -o osxiec osxiec.c -lsandbox
   Due to macOS limitations, complete isolation like in Linux is not possible. The contained directory will have some access to the outside environment, hence no config file is needed.
 
 - **Supported Features**:
-  Despite its limitations, OSXIEC provides isolation using namespaces, setuid, image layers, basic user process control, memory and CPU control, and special permissions using user IDs and group IDs, unpacking the image into a disk image(APFS).
+  Despite its limitations, OSXIEC provides isolation using namespaces, setuid, image layers, basic user process control, memory and CPU control, and special permissions using user IDs and group IDs, unpacking the image into a disk image(APFS), vlans.
 
 - **Layer Configuration**:
   Ensure a layers folder exists with specified layers as shown in the example folder.
