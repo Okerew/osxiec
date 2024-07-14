@@ -7,6 +7,7 @@
 #include <mach/mach.h>
 #include <pthread.h>
 #include <netinet/in.h>
+#include <arpa/inet.h>
 
 #define MAX_COMMAND_LEN 1024
 #define MAX_DEPENDENCIES 50 // Note this is not used for now as this was my attempt at dependencies but is way to much work for the tradeof, and deleting it would break the code
@@ -15,6 +16,7 @@
 #define MAX_LAYERS 20
 #define PORT 3000
 #define MAX_CLIENTS 5
+#define MAX_COMMAND_LEN 1024
 
 int port = PORT;
 
@@ -38,11 +40,20 @@ typedef struct {
     char network_mode[20];
     uid_t container_uid;
     gid_t container_gid;
+    char network_name[MAX_PATH_LEN];
+    int vlan_id;
 } ContainerConfig;
 
 typedef struct {
     char layer_dir[MAX_PATH_LEN];
 } Layer;
+
+typedef struct {
+    char name[MAX_PATH_LEN];
+    int vlan_id;
+    int num_containers;
+    char container_names[MAX_CLIENTS][MAX_PATH_LEN];
+} ContainerNetwork;
 
 int read_files(const char *dir_path, File *files, uid_t uid, gid_t gid) {
     DIR *dir;
@@ -163,7 +174,6 @@ void execute_command(const char *command) {
 }
 
 
-
 void containerize_directory(const char *dir_path, const char *output_file) {
     FILE *bin_file = fopen(output_file, "wb");
     if (bin_file == NULL) {
@@ -276,17 +286,193 @@ void apply_resource_limits(const ContainerConfig *config) {
     }
 }
 
-void setup_network_isolation(const char *network_mode) {
-    // Note this is very basic
-    if (strcmp(network_mode, "host") == 0) {
-        printf("Using host network mode\n");
-    } else if (strcmp(network_mode, "none") == 0) {
-        printf("Network isolation not fully implemented on macOS\n");
-    } else {
-        printf("Custom network modes not supported on macOS\n");
+ContainerNetwork load_container_network(const char *name) {
+    ContainerNetwork network = {0};
+
+    char filename[MAX_PATH_LEN];
+    snprintf(filename, sizeof(filename), "/tmp/network_%s.conf", name);
+
+    FILE *file = fopen(filename, "r");
+    if (file == NULL) {
+        fprintf(stderr, "Failed to load network configuration for %s\n", name);
+        return network;
+    }
+
+    char line[256];
+    while (fgets(line, sizeof(line), file)) {
+        if (sscanf(line, "name=%s", network.name) == 1) {
+            continue;
+        }
+        if (sscanf(line, "vlan_id=%d", &network.vlan_id) == 1) {
+            continue;
+        }
+    }
+
+    fclose(file);
+    return network;
+}
+
+void create_and_save_container_network(const char *name, int vlan_id) {
+    ContainerNetwork network;
+    strncpy(network.name, name, MAX_PATH_LEN - 1);
+    network.vlan_id = vlan_id;
+    network.num_containers = 0;
+
+    // Save the network configuration to a file
+    char filename[MAX_PATH_LEN];
+    snprintf(filename, sizeof(filename), "/tmp/network_%s.conf", name);
+
+    FILE *file = fopen(filename, "w");
+    if (file == NULL) {
+        perror("Failed to save network configuration");
+        return;
+    }
+
+    fprintf(file, "name=%s\n", network.name);
+    fprintf(file, "vlan_id=%d\n", network.vlan_id);
+    fclose(file);
+
+    printf("Created and saved network %s with VLAN ID %d\n", network.name, network.vlan_id);
+}
+
+void add_container_to_network(ContainerNetwork *network, const char *container_name) {
+    if (network->num_containers < MAX_CLIENTS) {
+        strncpy(network->container_names[network->num_containers], container_name, MAX_PATH_LEN - 1);
+        network->num_containers++;
     }
 }
 
+char *get_ip_address() {
+    int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock == -1) {
+        perror("socket");
+        return NULL;
+    }
+
+    struct sockaddr_in loopback;
+    memset(&loopback, 0, sizeof(loopback));
+    loopback.sin_family = AF_INET;
+    loopback.sin_addr.s_addr = inet_addr("8.8.8.8");
+    loopback.sin_port = htons(53);
+
+    if (connect(sock, (struct sockaddr *)&loopback, sizeof(loopback)) == -1) {
+        perror("connect");
+        close(sock);
+        return NULL;
+    }
+
+    struct sockaddr_in addr;
+    socklen_t addr_len = sizeof(addr);
+    if (getsockname(sock, (struct sockaddr *)&addr, &addr_len) == -1) {
+        perror("getsockname");
+        close(sock);
+        return NULL;
+    }
+
+    close(sock);
+    char *ip = strdup(inet_ntoa(addr.sin_addr));
+    return ip;
+}
+
+void setup_pf_rules(ContainerNetwork *network) {
+    char *ip_address = get_ip_address();
+    if (ip_address == NULL) {
+        fprintf(stderr, "Failed to get IP address\n");
+        return;
+    }
+
+    // Assign IP address to the VLAN interface
+    char ip_cmd[256];
+    snprintf(ip_cmd, sizeof(ip_cmd), "ifconfig vlan%d inet %s/24", network->vlan_id, ip_address);
+    system(ip_cmd);
+
+    // Create a temporary file for the new rules
+    char temp_file[] = "/tmp/pf_rules_XXXXXX";
+    int fd = mkstemp(temp_file);
+    if (fd == -1) {
+        perror("Failed to create temporary file");
+        return;
+    }
+
+    FILE *temp_pf_conf = fdopen(fd, "w");
+    if (temp_pf_conf == NULL) {
+        perror("Failed to open temporary file");
+        close(fd);
+        return;
+    }
+
+    // Write the new rules to the temporary file
+    fprintf(temp_pf_conf,
+        "# VLAN %d rules\n"
+        "nat on en0 from vlan%d:network to any -> (en0)\n"
+        "pass in on vlan%d all\n"
+        "pass out on vlan%d all\n",
+        network->vlan_id,
+        network->vlan_id,
+        network->vlan_id,
+        network->vlan_id
+    );
+    fclose(temp_pf_conf);
+
+    // Append the new rules to the existing pf.conf
+    char append_cmd[256];
+    snprintf(append_cmd, sizeof(append_cmd), "cat %s >> /etc/pf.conf", temp_file);
+    system(append_cmd);
+
+    // Remove the temporary file
+    unlink(temp_file);
+
+    // Reload pf rules
+    system("pfctl -f /etc/pf.conf");
+
+    // Enable pf if it's not already enabled
+    system("pfctl -e");
+
+    free(ip_address);
+}
+
+
+void setup_network_isolation(ContainerConfig *config, ContainerNetwork *network) {
+    if (strcmp(config->network_mode, "bridge") == 0) {
+        config->vlan_id = network->vlan_id;
+        add_container_to_network(network, config->name);
+
+        printf("Setting up bridge network. Container %s on VLAN %d\n", config->name, config->vlan_id);
+
+        char vlan_cmd[256];
+        snprintf(vlan_cmd, sizeof(vlan_cmd), "ifconfig vlan%d create vlan %d vlandev en0",
+                 config->vlan_id, config->vlan_id);
+        system(vlan_cmd);
+
+        snprintf(vlan_cmd, sizeof(vlan_cmd), "ifconfig vlan%d up", config->vlan_id);
+        system(vlan_cmd);
+    } else if (strcmp(config->network_mode, "host") == 0) {
+        printf("Using host network mode\n");
+    } else if (strcmp(config->network_mode, "none") == 0) {
+        printf("Network isolation set to none\n");
+    } else {
+        printf("Unsupported network mode\n");
+    }
+}
+
+void enable_container_communication(ContainerNetwork *network) {
+    char pf_rule[256];
+    snprintf(pf_rule, sizeof(pf_rule),
+        "pass on vlan%d all\n",
+        network->vlan_id);
+
+    // Append the rule to pf.conf
+    FILE *pf_conf = fopen("/etc/pf.conf", "a");
+    if (pf_conf == NULL) {
+        perror("Failed to open /etc/pf.conf");
+        return;
+    }
+    fprintf(pf_conf, "%s", pf_rule);
+    fclose(pf_conf);
+
+    // Reload pf rules
+    system("pfctl -f /etc/pf.conf");
+}
 
 void apply_layer(const char *layer_dir, const char *target_dir) {
     char command[MAX_COMMAND_LEN];
@@ -362,11 +548,12 @@ void start_network_listener() {
     }
 }
 
-
-
-void create_isolated_environment(FILE *bin_file, const char *bin_file_path) {
+void create_isolated_environment(FILE *bin_file, const char *bin_file_path, ContainerNetwork *network) {
     ContainerConfig config;
     fread(&config, sizeof(ContainerConfig), 1, bin_file);
+
+    setup_network_isolation(&config, network);
+    enable_container_communication(network);
 
     int num_layers;
     fread(&num_layers, sizeof(int), 1, bin_file);
@@ -458,9 +645,6 @@ void create_isolated_environment(FILE *bin_file, const char *bin_file_path) {
     // Apply resource limits
     apply_resource_limits(&config);
 
-    // Setup network isolation
-    setup_network_isolation(config.network_mode);
-
     // Setup sandbox profile
     char sandbox_profile[1024];
     snprintf(sandbox_profile, sizeof(sandbox_profile),
@@ -518,21 +702,18 @@ void create_isolated_environment(FILE *bin_file, const char *bin_file_path) {
     pthread_cancel(network_thread);
     pthread_join(network_thread, NULL);
 
-    // Unmount and remove the disk image
-    char unmount_command[MAX_COMMAND_LEN];
-    snprintf(unmount_command, sizeof(unmount_command), "hdiutil detach %s", container_root);
-    system(unmount_command);
-
-    char remove_disk_command[MAX_COMMAND_LEN];
-    snprintf(remove_disk_command, sizeof(remove_disk_command), "rm %s", disk_image_path);
-    system(remove_disk_command);
 }
 
 
 int main(int argc, char *argv[]) {
-    // We are not using argc < 3 because then the version command wouldn't work
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s -<contain|execute> <directory_path|bin_file> [-port <port>]\n", argv[0]);
+        fprintf(stderr, "Usage: %s <command> [options]\n"
+                        "Commands:\n"
+                        "  -contain <directory_path> <output_file>\n"
+                        "  -execute <bin_file> [-port <port>]\n"
+                        "  -network create <name> <vlan_id>\n"
+                        "  -run <container_file> <network_name> [-port <port>]\n"
+                        "  --version\n", argv[0]);
         return EXIT_FAILURE;
     }
 
@@ -549,8 +730,17 @@ int main(int argc, char *argv[]) {
         containerize_directory(argv[2], argv[3]);
         printf("Directory contents containerized into '%s'.\n", argv[3]);
     } else if (strcmp(argv[1], "-execute") == 0) {
-        if (argc >= 4 && strcmp(argv[3], "-port") == 0 && argc >= 5) {
-            port = atoi(argv[4]);
+        if (argc < 3) {
+            fprintf(stderr, "Usage for execute: %s -execute <bin_file> [-port <port>]\n", argv[0]);
+            return EXIT_FAILURE;
+        }
+
+        // Parse port if provided
+        for (int i = 3; i < argc; i++) {
+            if (strcmp(argv[i], "-port") == 0 && i + 1 < argc) {
+                port = atoi(argv[i + 1]);
+                break;
+            }
         }
 
         FILE *bin_file = fopen(argv[2], "rb");
@@ -558,18 +748,50 @@ int main(int argc, char *argv[]) {
             perror("Error opening binary file");
             return EXIT_FAILURE;
         }
-        create_isolated_environment(bin_file, argv[2]);
+
+        ContainerNetwork dummy_network = {0};
+        create_isolated_environment(bin_file, argv[2], &dummy_network);
         fclose(bin_file);
 
-        pthread_t network_thread;
-        if (pthread_create(&network_thread, NULL, (void *(*)(void *))start_network_listener, NULL) != 0) {
-            perror("Failed to create network listener thread");
+    } else if (strcmp(argv[1], "-network") == 0 && strcmp(argv[2], "create") == 0) {
+        if (argc < 5) {
+            fprintf(stderr, "Usage: %s -network create <name> <vlan_id>\n", argv[0]);
+            return EXIT_FAILURE;
+        }
+        create_and_save_container_network(argv[3], atoi(argv[4]));
+        ContainerNetwork network = load_container_network(argv[3]);
+        setup_pf_rules(&network);
+    }
+    else if (strcmp(argv[1], "-run") == 0) {
+        if (argc < 4) {
+            fprintf(stderr, "Usage: %s run <container_file> <network_name> [-port <port>]\n", argv[0]);
+            return EXIT_FAILURE;
         }
 
-        // Wait for network listener thread to finish
-        pthread_join(network_thread, NULL);
-    } else if (strcmp("--version", argv[1]) == 0) {
-        printf("Osxiec version 0.1\n");
+        for (int i = 4; i < argc; i++) {
+            if (strcmp(argv[i], "-port") == 0 && i + 1 < argc) {
+                port = atoi(argv[i + 1]);
+                break;
+            }
+        }
+
+        // Load network configuration
+        ContainerNetwork network = load_container_network(argv[3]);
+
+        if (network.vlan_id == 0) {
+            fprintf(stderr, "Failed to load network configuration for %s\n", argv[3]);
+            return EXIT_FAILURE;
+        }
+
+        FILE *bin_file = fopen(argv[2], "rb");
+        if (bin_file == NULL) {
+            perror("Error opening binary file");
+            return EXIT_FAILURE;
+        }
+        create_isolated_environment(bin_file, argv[2], &network);
+        fclose(bin_file);
+    } else if (strcmp(argv[1], "--version") == 0) {
+        printf("Osxiec version 0.2\n");
     } else {
         fprintf(stderr, "Unknown command: %s\n", argv[1]);
         return EXIT_FAILURE;
