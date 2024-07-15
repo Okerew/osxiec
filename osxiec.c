@@ -8,6 +8,8 @@
 #include <pthread.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <curl/curl.h>
+#include <spawn.h>
 
 #define MAX_COMMAND_LEN 1024
 #define MAX_DEPENDENCIES 50 // Note this is not used for now as this was my attempt at dependencies but is way to much work for the tradeof, and deleting it would break the code
@@ -42,6 +44,7 @@ typedef struct {
     gid_t container_gid;
     char network_name[MAX_PATH_LEN];
     int vlan_id;
+    char start_config[MAX_PATH_LEN];
 } ContainerConfig;
 
 typedef struct {
@@ -132,49 +135,97 @@ int read_files(const char *dir_path, File *files, uid_t uid, gid_t gid) {
     return num_files;
 }
 
+extern char **environ;
+
 void execute_command(const char *command) {
+    if (command == NULL || strlen(command) == 0) {
+        fprintf(stderr, "Error: Empty command\n");
+        return;
+    }
+
     printf("Executing: %s\n", command);
 
-    pid_t pid = fork();
+    char *args[MAX_COMMAND_LEN / 2 + 1];
+    char *command_copy = strdup(command);
+    if (command_copy == NULL) {
+        perror("Failed to allocate memory for command");
+        return;
+    }
 
-    if (pid == 0) {
-        char *args[MAX_COMMAND_LEN / 2 + 1];
-        char *command_copy = strdup(command);
-        char *token = strtok(command_copy, " ");
-        int i = 0;
+    char *token = strtok(command_copy, " ");
+    int i = 0;
 
-        while (token != NULL && i < MAX_COMMAND_LEN / 2) {
-            args[i++] = token;
-            token = strtok(NULL, " ");
-        }
-        args[i] = NULL;
+    while (token != NULL && i < MAX_COMMAND_LEN / 2) {
+        args[i++] = token;
+        token = strtok(NULL, " ");
+    }
+    args[i] = NULL;
 
-        if (execvp(args[0], args) == -1) {
-            perror("Error executing command");
-        }
+    pid_t pid;
+    int status;
+    posix_spawn_file_actions_t actions;
+    posix_spawnattr_t attr;
 
+    if (posix_spawn_file_actions_init(&actions) != 0) {
+        perror("posix_spawn_file_actions_init failed");
         free(command_copy);
-        exit(EXIT_FAILURE);
-    } else if (pid < 0) {
-        // Fork failed
-        perror("Fork failed");
-    } else {
-        // Parent process
-        int status;
-        if (waitpid(pid, &status, 0) == -1) {
+        return;
+    }
+
+    if (posix_spawnattr_init(&attr) != 0) {
+        perror("posix_spawnattr_init failed");
+        posix_spawn_file_actions_destroy(&actions);
+        free(command_copy);
+        return;
+    }
+
+    int ret = posix_spawnp(&pid, args[0], &actions, &attr, args, environ);
+
+    if (ret == 0) {
+        if (waitpid(pid, &status, 0) != -1) {
+            if (WIFEXITED(status)) {
+                printf("Child process exited with status %d\n", WEXITSTATUS(status));
+            } else if (WIFSIGNALED(status)) {
+                printf("Child process terminated by signal %d\n", WTERMSIG(status));
+            }
+        } else {
             perror("Error waiting for child process");
         }
-
-        if (WIFEXITED(status)) {
-            printf("Child process exited with status %d\n", WEXITSTATUS(status));
-        } else if (WIFSIGNALED(status)) {
-            printf("Child process terminated by signal %d\n", WTERMSIG(status));
-        }
+    } else {
+        fprintf(stderr, "posix_spawnp failed: %s\n", strerror(ret));
     }
+
+    posix_spawn_file_actions_destroy(&actions);
+    posix_spawnattr_destroy(&attr);
+    free(command_copy);
+}
+
+void execute_start_config(const char *config_file) {
+    FILE *file = fopen(config_file, "r");
+    if (file == NULL) {
+        perror("Error opening start configuration file");
+        return;
+    }
+
+    char line[MAX_COMMAND_LEN];
+    while (fgets(line, sizeof(line), file)) {
+        // Remove newline character if present
+        line[strcspn(line, "\n")] = 0;
+
+        // Skip empty lines and comments
+        if (line[0] == '\0' || line[0] == '#') {
+            continue;
+        }
+
+        printf("Executing start command: %s\n", line);
+        execute_command(line);
+    }
+
+    fclose(file);
 }
 
 
-void containerize_directory(const char *dir_path, const char *output_file) {
+void containerize_directory(const char *dir_path, const char *output_file, const char *start_config_file) {
     FILE *bin_file = fopen(output_file, "wb");
     if (bin_file == NULL) {
         perror("Error opening output file");
@@ -195,6 +246,12 @@ void containerize_directory(const char *dir_path, const char *output_file) {
         .container_uid = 1000,  // Default unprivileged user ID
         .container_gid = 1000   // Default unprivileged group ID
     };
+    if (start_config_file) {
+        strncpy(config.start_config, start_config_file, MAX_PATH_LEN - 1);
+        config.start_config[MAX_PATH_LEN - 1] = '\0';
+    } else {
+        config.start_config[0] = '\0';
+    }
     num_files = read_files(dir_path, files, config.container_uid, config.container_gid);
     if (num_files < 0) {
         fclose(bin_file);
@@ -383,47 +440,47 @@ void setup_pf_rules(ContainerNetwork *network) {
 
     // Assign IP address to the VLAN interface
     char ip_cmd[256];
-    snprintf(ip_cmd, sizeof(ip_cmd), "ifconfig vlan%d inet %s/24", network->vlan_id, ip_address);
+    snprintf(ip_cmd, sizeof(ip_cmd), "ifconfig vlan%d create vlan %d vlandev en0 && ifconfig vlan%d inet %s/24 up",
+             network->vlan_id, network->vlan_id, network->vlan_id, ip_address);
     system(ip_cmd);
 
-    // Create a temporary file for the new rules
-    char temp_file[] = "/tmp/pf_rules_XXXXXX";
-    int fd = mkstemp(temp_file);
-    if (fd == -1) {
-        perror("Failed to create temporary file");
+    // Create a new file for VLAN rules
+    char vlan_rules_file[64];
+    snprintf(vlan_rules_file, sizeof(vlan_rules_file), "/etc/pf.vlan%d.conf", network->vlan_id);
+
+    FILE *vlan_pf_conf = fopen(vlan_rules_file, "w");
+    if (vlan_pf_conf == NULL) {
+        perror("Failed to create VLAN rules file");
+        free(ip_address);
         return;
     }
 
-    FILE *temp_pf_conf = fdopen(fd, "w");
-    if (temp_pf_conf == NULL) {
-        perror("Failed to open temporary file");
-        close(fd);
-        return;
-    }
-
-    // Write the new rules to the temporary file
-    fprintf(temp_pf_conf,
+    // Write the VLAN rules to the new file
+    fprintf(vlan_pf_conf,
         "# VLAN %d rules\n"
-        "nat on en0 from vlan%d:network to any -> (en0)\n"
+        "nat on en0 from %s/24 to any -> (en0)\n"
+        "pass on vlan%d all\n"
         "pass in on vlan%d all\n"
         "pass out on vlan%d all\n",
         network->vlan_id,
+        ip_address,
         network->vlan_id,
         network->vlan_id,
         network->vlan_id
     );
-    fclose(temp_pf_conf);
+    fclose(vlan_pf_conf);
 
-    // Append the new rules to the existing pf.conf
-    char append_cmd[256];
-    snprintf(append_cmd, sizeof(append_cmd), "cat %s >> /etc/pf.conf", temp_file);
-    system(append_cmd);
+    // Add include statement to main pf.conf if not already present
+    char include_cmd[256];
+    snprintf(include_cmd, sizeof(include_cmd),
+        "grep -q 'include \"%s\"' /etc/pf.conf || echo 'include \"%s\"' >> /etc/pf.conf",
+        vlan_rules_file, vlan_rules_file);
+    system(include_cmd);
 
-    // Remove the temporary file
-    unlink(temp_file);
-
-    // Reload pf rules
-    system("pfctl -f /etc/pf.conf");
+    // Reload only the VLAN rules
+    char reload_cmd[256];
+    snprintf(reload_cmd, sizeof(reload_cmd), "pfctl -f %s", vlan_rules_file);
+    system(reload_cmd);
 
     // Enable pf if it's not already enabled
     system("pfctl -e");
@@ -682,6 +739,12 @@ void create_isolated_environment(FILE *bin_file, const char *bin_file_path, Cont
         perror("Failed to create network listener thread");
     }
 
+    if (config.start_config[0] != '\0') {
+        char start_config_path[MAX_PATH_LEN];
+        snprintf(start_config_path, sizeof(start_config_path), "%s/%s", container_root, config.start_config);
+        execute_start_config(start_config_path);
+    }
+
     char command[MAX_COMMAND_LEN];
     while (1) {
         printf("> ");
@@ -704,7 +767,6 @@ void create_isolated_environment(FILE *bin_file, const char *bin_file_path, Cont
 
 }
 
-
 int main(int argc, char *argv[]) {
     if (argc < 2) {
         fprintf(stderr, "Usage: %s <command> [options]\n"
@@ -719,7 +781,7 @@ int main(int argc, char *argv[]) {
 
     if (strcmp(argv[1], "-contain") == 0) {
         if (argc < 4) {
-            fprintf(stderr, "Usage for containerize: %s -contain <directory_path> <output_file>\n", argv[0]);
+            fprintf(stderr, "Usage for containerize: %s -contain <directory_path> <output_file> [start_config_file]\n", argv[0]);
             return EXIT_FAILURE;
         }
         if (geteuid() != 0) {
@@ -727,7 +789,8 @@ int main(int argc, char *argv[]) {
             return EXIT_FAILURE;
         }
 
-        containerize_directory(argv[2], argv[3]);
+        const char *start_config_file = (argc > 4) ? argv[4] : NULL;
+        containerize_directory(argv[2], argv[3], start_config_file);
         printf("Directory contents containerized into '%s'.\n", argv[3]);
     } else if (strcmp(argv[1], "-execute") == 0) {
         if (argc < 3) {
