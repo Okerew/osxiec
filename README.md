@@ -82,4 +82,8 @@ gcc -o osxiec osxiec.c -lsandbox
   Ensure a layers folder exists with specified layers as shown in the example folder.
 - **Support**: Remember that not everything will work for example node won't work because it is making sys calls which spawn things outside the container.
 - **Temps**: If you need a lot of storage for the moment, and you used a container, delete the dmg in /tmp folder, note these images are also deleted each time the system restarts.
+
+- **Why is chroot not used?**
+Chroot requires for SIP to be disabled, which causes many security risks, chroot can be easily exited by any process, using the normal macOS restrictions is way more secure, and reliable
+it causes many permission issues, apple does not really like it and will probably make it harder to use it later on in the future. 
 ---
