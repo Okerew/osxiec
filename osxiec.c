@@ -8,7 +8,6 @@
 #include <pthread.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include <curl/curl.h>
 #include <spawn.h>
 
 #define MAX_COMMAND_LEN 1024
