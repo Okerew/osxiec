@@ -31,7 +31,7 @@ Then repeat steps 1, 2, and 3.
 
 **Containerize a Directory**:
 ```sh
-sudo osxiec -contain {directory_path} {some_name}.bin
+sudo osxiec -contain {directory_path} {some_name}.bin {path_to_config_file_in_directory_path}
 ```
 
 **Execute a Container**:
