@@ -9,6 +9,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <spawn.h>
+#include <curl/curl.h>
 
 #define MAX_COMMAND_LEN 1024
 #define MAX_DEPENDENCIES 50 // Note this is not used for now as this was my attempt at dependencies but is way to much work for the tradeof, and deleting it would break the code
@@ -766,15 +767,143 @@ void create_isolated_environment(FILE *bin_file, const char *bin_file_path, Cont
 
 }
 
+size_t write_data(void *ptr, size_t size, size_t nmemb, FILE *stream) {
+    size_t written = fwrite(ptr, size, nmemb, stream);
+    return written;
+}
+
+void download_file(const char* file_name) {
+    CURL *curl;
+    FILE *fp;
+    CURLcode res;
+    curl = curl_easy_init();
+    if(curl) {
+        char save_path[256];
+        snprintf(save_path, sizeof(save_path), "./%s", file_name);
+        fp = fopen(save_path, "wb");
+        char url[256];
+        snprintf(url, sizeof(url), "https://b9e61994-5ec3-457b-a095-cc05e2160e57-00-3ka9snrwa24rh.worf.replit.dev0/files/%s", file_name);
+        curl_easy_setopt(curl, CURLOPT_URL, url);
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_data);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
+        res = curl_easy_perform(curl);
+        if(res != CURLE_OK)
+            fprintf(stderr, "curl_easy_perform() failed: %s\n", curl_easy_strerror(res));
+        fclose(fp);
+        curl_easy_cleanup(curl);
+    }
+}
+
+struct Memory {
+    char *response;
+    size_t size;
+};
+
+static size_t WriteMemoryCallback(void *contents, size_t size, size_t nmemb, void *userp) {
+    size_t realsize = size * nmemb;
+    struct Memory *mem = (struct Memory *)userp;
+
+    char *ptr = realloc(mem->response, mem->size + realsize + 1);
+    if (ptr == NULL) {
+        printf("Not enough memory (realloc returned NULL)\n");
+        return 0;
+    }
+
+    mem->response = ptr;
+    memcpy(&(mem->response[mem->size]), contents, realsize);
+    mem->size += realsize;
+    mem->response[mem->size] = 0;
+
+    return realsize;
+}
+
+void search(const char *term) {
+    CURL *curl;
+    CURLcode res;
+    struct Memory chunk = {0};
+
+    curl_global_init(CURL_GLOBAL_DEFAULT);
+    curl = curl_easy_init();
+
+    if (curl) {
+        char url[256];
+        snprintf(url, sizeof(url), "https://b9e61994-5ec3-457b-a095-cc05e2160e57-00-3ka9snrwa24rh.worf.replit.dev/search?term=%s", term);
+
+        curl_easy_setopt(curl, CURLOPT_URL, url);
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteMemoryCallback);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)&chunk);
+
+        res = curl_easy_perform(curl);
+
+        if (res != CURLE_OK) {
+            fprintf(stderr, "curl_easy_perform() failed: %s\n", curl_easy_strerror(res));
+        } else {
+            printf("Search results:\n%s\n", chunk.response);
+        }
+
+        curl_easy_cleanup(curl);
+    }
+
+    free(chunk.response);
+    curl_global_cleanup();
+}
+
+void upload_file(const char *filename, const char *username, const char *password, const char *description) {
+    CURL *curl;
+    CURLcode res;
+    struct curl_httppost *formpost = NULL;
+    struct curl_httppost *lastptr = NULL;
+
+    curl_global_init(CURL_GLOBAL_ALL);
+
+    // Create the form
+    curl_formadd(&formpost, &lastptr,
+                 CURLFORM_COPYNAME, "file",
+                 CURLFORM_FILE, filename,
+                 CURLFORM_END);
+
+    curl_formadd(&formpost, &lastptr,
+                 CURLFORM_COPYNAME, "username",
+                 CURLFORM_COPYCONTENTS, username,
+                 CURLFORM_END);
+
+    curl_formadd(&formpost, &lastptr,
+                 CURLFORM_COPYNAME, "password",
+                 CURLFORM_COPYCONTENTS, password,
+                 CURLFORM_END);
+
+    curl_formadd(&formpost, &lastptr,
+                 CURLFORM_COPYNAME, "description",
+                 CURLFORM_COPYCONTENTS, description,
+                 CURLFORM_END);
+
+    curl = curl_easy_init();
+    if (curl) {
+        curl_easy_setopt(curl, CURLOPT_URL, "https://b9e61994-5ec3-457b-a095-cc05e2160e57-00-3ka9snrwa24rh.worf.replit.dev/upload");
+        curl_easy_setopt(curl, CURLOPT_HTTPPOST, formpost);
+
+        // Perform the request
+        res = curl_easy_perform(curl);
+
+        // Check for errors
+        if (res != CURLE_OK) {
+            fprintf(stderr, "curl_easy_perform() failed: %s\n", curl_easy_strerror(res));
+        } else {
+            printf("File uploaded successfully.\n");
+        }
+
+        // Clean up
+        curl_easy_cleanup(curl);
+    }
+
+    curl_formfree(formpost);
+    curl_global_cleanup();
+}
+
 int main(int argc, char *argv[]) {
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s <command> [options]\n"
-                        "Commands:\n"
-                        "  -contain <directory_path> <output_file>\n"
-                        "  -execute <bin_file> [-port <port>]\n"
-                        "  -network create <name> <vlan_id>\n"
-                        "  -run <container_file> <network_name> [-port <port>]\n"
-                        "  --version\n", argv[0]);
+        fprintf(stderr, "Unknown command: %s\n"
+                        , argv[0]);
         return EXIT_FAILURE;
     }
 
@@ -854,6 +983,37 @@ int main(int argc, char *argv[]) {
         fclose(bin_file);
     } else if (strcmp(argv[1], "--version") == 0) {
         printf("Osxiec version 0.2\n");
+    } else if (strcmp(argv[1], "-pull") == 0) {
+        if (argc != 3) {
+            printf("Usage: %s pull <file_name>\n", argv[0]);
+            return 1;
+        }
+        download_file(argv[2]);
+
+    } else if (strcmp(argv[1], "-search") == 0) {
+        if (argc != 3) {
+            fprintf(stderr, "Usage: %s -search <search_term>\n", argv[0]);
+            return EXIT_FAILURE;
+        }
+        search(argv[2]);
+    } else if (strcmp(argv[1], "-upload") == 0) {
+        if (argc != 6) {
+            fprintf(stderr, "Usage: %s -upload <filename> <username> <password> <description>\n", argv[0]);
+            return EXIT_FAILURE;
+        }
+        upload_file(argv[2], argv[3], argv[4], argv[5]);
+    } else if (strcmp(argv[1], "-help") == 0) {
+        printf("Available commands:\n");
+        printf("  -contain <directory_path> <output_file>\n");
+        printf("  -execute <directory_path> [-port <port>]\n");
+        printf("  -network create <name> <vlan_id>\n");
+        printf("  -run <container_file> <network_name> [-port <port>]\n");
+        printf("  -pull <file_name>\n");
+        printf("  -search <search_term>\n");
+        printf("  -upload <filename> <username> <password> <description>\n");
+        printf("  --version\n");
+        printf("  -help\n");
+
     } else {
         fprintf(stderr, "Unknown command: %s\n", argv[1]);
         return EXIT_FAILURE;
