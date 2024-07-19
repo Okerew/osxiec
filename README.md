@@ -27,6 +27,7 @@ sudo rm /usr/local/bin/osxiec
 ```
 Then repeat steps 1, 2, and 3.
 
+
 ## Usage
 
 **Containerize a Directory**:
@@ -55,6 +56,22 @@ sudo osxiec -run {some_name} {network_name} -port {PORT_NUMBER}
 ```sh
 osxiec --version
 ```
+**Pull**
+```sh
+osxiec -pull {container_name}
+```
+**Search**
+```sh
+osxiec -search {search_term_for_osxiec_hub}
+```
+**Upload**
+```sh
+osxiec -upload {filename} {username} {password} {description}
+```
+**Help**
+```sh
+osxiec -help
+```
 ## Building
 **Git clone the repository**
 ``` sh
@@ -62,7 +79,7 @@ git clone https://github.com/Okerew/osxiec
 ```
 **Build the executable**
 ```sh
-gcc -o osxiec osxiec.c -lsandbox
+gcc -o osxiec osxiec.c -lcurl
 ```
 ## Notes
 
@@ -84,6 +101,6 @@ gcc -o osxiec osxiec.c -lsandbox
 - **Temps**: If you need a lot of storage for the moment, and you used a container, delete the dmg in /tmp folder, note these images are also deleted each time the system restarts.
 
 - **Why is chroot not used?**
-Chroot requires for SIP to be disabled, which causes many security risks, chroot can be easily exited by any process, using the normal macOS restrictions is way more secure, and reliable
-it causes many permission issues, apple does not really like it and will probably make it harder to use it later on in the future. 
+  Chroot requires for SIP to be disabled, which causes many security risks, chroot can be easily exited by any process, using the normal macOS restrictions is way more secure, and reliable
+  it causes many permission issues, apple does not really like it and will probably make it harder to use it later on in the future.
 ---
