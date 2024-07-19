@@ -84,7 +84,7 @@ gcc -o osxiec osxiec.c -lcurl
 ## Notes
 
 - **Not a Docker Replacement**:
-  While OSXIEC offers similar functionality to Docker, it lacks some advanced features of Docker.
+  While OSXIEC offers similar functionality to Docker, it lacks some advanced features of Docker. It is more supposed to be a quicker testing tool than docker on macos, it is not designed to replace it, just to test basic ideas and software.
 
 - **macOS Only**:
   OSXIEC uses native macOS features and is not compatible with other operating systems.
