@@ -1,1 +1,1 @@
-wget
+echo test
