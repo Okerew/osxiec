@@ -782,7 +782,7 @@ void download_file(const char* file_name) {
         snprintf(save_path, sizeof(save_path), "./%s", file_name);
         fp = fopen(save_path, "wb");
         char url[256];
-        snprintf(url, sizeof(url), "https://b9e61994-5ec3-457b-a095-cc05e2160e57-00-3ka9snrwa24rh.worf.replit.dev0/files/%s", file_name);
+        snprintf(url, sizeof(url), "https://osxiec-file-server-1.onrender.com/files/%s", file_name);
         curl_easy_setopt(curl, CURLOPT_URL, url);
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_data);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
@@ -827,7 +827,7 @@ void search(const char *term) {
 
     if (curl) {
         char url[256];
-        snprintf(url, sizeof(url), "https://b9e61994-5ec3-457b-a095-cc05e2160e57-00-3ka9snrwa24rh.worf.replit.dev/search?term=%s", term);
+        snprintf(url, sizeof(url), "https://osxiec-file-server-1.onrender.com/search?term=%s", term);
 
         curl_easy_setopt(curl, CURLOPT_URL, url);
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteMemoryCallback);
@@ -879,7 +879,7 @@ void upload_file(const char *filename, const char *username, const char *passwor
 
     curl = curl_easy_init();
     if (curl) {
-        curl_easy_setopt(curl, CURLOPT_URL, "https://b9e61994-5ec3-457b-a095-cc05e2160e57-00-3ka9snrwa24rh.worf.replit.dev/upload");
+        curl_easy_setopt(curl, CURLOPT_URL, "https://osxiec-file-server-1.onrender.com/upload");
         curl_easy_setopt(curl, CURLOPT_HTTPPOST, formpost);
 
         // Perform the request
