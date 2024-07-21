@@ -139,7 +139,7 @@ ___
 ## Building
 **Git clone the repository**
 ``` sh
-git clone https:/github.com/Okerew/osxiec
+git clone https://github.com/Okerew/osxiec.git
 ```
 **Go to the directory**
 ``` sh
