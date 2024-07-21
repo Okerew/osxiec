@@ -2,6 +2,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <dirent.h>
+#include <errno.h>
 #include <sandbox.h>
 #include <mach/mach.h>
 #include <pthread.h>
@@ -9,18 +10,23 @@
 #include <arpa/inet.h>
 #include <spawn.h>
 #include <curl/curl.h>
+#include <readline/readline.h>
+#include "plugin_manager/plugin_manager.h"
+#include <pwd.h>
+
 
 #define MAX_COMMAND_LEN 1024
-#define MAX_DEPENDENCIES 50 // Note this is not used for now as this was my attempt at dependencies but is way to much work for the tradeof, and deleting it would break the code
 #define MAX_PATH_LEN 256
-#define MAX_FILE_SIZE 1024*1024*1024
+#define MAX_FILE_SIZE 1024*1024*1024 // 1 GB
 #define MAX_LAYERS 20
 #define PORT 3000
 #define MAX_CLIENTS 5
-#define MAX_COMMAND_LEN 1024
+#define DEBUG_NONE 0
+#define DEBUG_STEP 1
+#define DEBUG_BREAK 2
+#define CHUNK_SIZE 8192  // 8 KB chunks
 
 int port = PORT;
-
 
 typedef struct {
     char name[MAX_PATH_LEN];
@@ -57,6 +63,22 @@ typedef struct {
     char container_names[MAX_CLIENTS][MAX_PATH_LEN];
 } ContainerNetwork;
 
+int debug_mode = DEBUG_NONE;
+char *breakpoint = NULL;
+
+typedef struct {
+    char current_directory[MAX_PATH_LEN];
+    char last_executed_command[MAX_COMMAND_LEN];
+    int num_processes;
+    long memory_usage;
+    char network_status[50];
+    char **environment_variables;
+    int num_env_vars;
+} ContainerState;
+
+ContainerState container_state = {0};
+
+
 int read_files(const char *dir_path, File *files, uid_t uid, gid_t gid) {
     DIR *dir;
     struct dirent *entry;
@@ -70,7 +92,7 @@ int read_files(const char *dir_path, File *files, uid_t uid, gid_t gid) {
         return -1;
     }
 
-    while ((entry = readdir(dir)) != NULL && num_files < MAX_DEPENDENCIES) {
+    while ((entry = readdir(dir)) != NULL) {
         if (entry->d_type == DT_REG) {  // Check if it is a regular file
             snprintf(file_path, sizeof(file_path), "%s/%s", dir_path, entry->d_name);
 
@@ -136,13 +158,114 @@ int read_files(const char *dir_path, File *files, uid_t uid, gid_t gid) {
 
 extern char **environ;
 
+void update_container_state() {
+    // Update current directory
+    getcwd(container_state.current_directory, MAX_PATH_LEN);
+
+    // Update number of processes
+    container_state.num_processes = 1;
+
+    // Update memory usage
+    FILE* file = fopen("/proc/self/status", "r");
+    if (file) {
+        char line[128];
+        while (fgets(line, sizeof(line), file)) {
+            if (strncmp(line, "VmRSS:", 6) == 0) {
+                sscanf(line + 6, "%ld", &container_state.memory_usage);
+                break;
+            }
+        }
+        fclose(file);
+    }
+
+    strcpy(container_state.network_status, "Connected");
+
+    // Update environment variables
+    for (int i = 0; environ[i] != NULL; i++) {
+        if (i >= container_state.num_env_vars) {
+            container_state.environment_variables = realloc(container_state.environment_variables, (i + 1) * sizeof(char*));
+            container_state.environment_variables[i] = strdup(environ[i]);
+            container_state.num_env_vars++;
+        } else if (strcmp(container_state.environment_variables[i], environ[i]) != 0) {
+            free(container_state.environment_variables[i]);
+            container_state.environment_variables[i] = strdup(environ[i]);
+        }
+    }
+}
+
+void print_container_state() {
+    update_container_state();
+
+    printf("Container State:\n");
+    printf("  Current Directory: %s\n", container_state.current_directory);
+    printf("  Last Executed Command: %s\n", container_state.last_executed_command);
+    printf("  Number of Processes: %d\n", container_state.num_processes);
+    printf("  Memory Usage: %ld KB\n", container_state.memory_usage);
+    printf("  Network Status: %s\n", container_state.network_status);
+    printf("  Environment Variables:\n");
+    for (int i = 0; i < container_state.num_env_vars; i++) {
+        printf("    %s\n", container_state.environment_variables[i]);
+    }
+}
+
+void handle_debug_command(char *command) {
+    if (strcmp(command, "continue") == 0 || strcmp(command, "c") == 0) {
+        debug_mode = DEBUG_NONE;
+    } else if (strcmp(command, "step") == 0 || strcmp(command, "s") == 0) {
+        debug_mode = DEBUG_STEP;
+    } else if (strncmp(command, "break ", 6) == 0) {
+        if (breakpoint) free(breakpoint);
+        breakpoint = strdup(command + 6);
+        debug_mode = DEBUG_BREAK;
+    } else if (strcmp(command, "print") == 0 || strcmp(command, "p") == 0) {
+        print_container_state();
+    } else if (strncmp(command, "print ", 6) == 0 || strncmp(command, "p ", 2) == 0) {
+        char *var_name = command + (command[1] == ' ' ? 2 : 6);
+        char *var_value = getenv(var_name);
+        if (var_value) {
+            printf("%s = %s\n", var_name, var_value);
+        } else {
+            printf("Variable %s not found\n", var_name);
+        }
+    } else if (strcmp(command, "help") == 0 || strcmp(command, "h") == 0) {
+        printf("Debug commands:\n");
+        printf("  continue (c) - Continue execution\n");
+        printf("  step (s) - Step to next command\n");
+        printf("  break <command> - Set breakpoint at command\n");
+        printf("  print (p) - Print container state\n");
+        printf("  print <var> (p <var>) - Print value of environment variable\n");
+        printf("  help (h) - Show this help message\n");
+    } else {
+        printf("Unknown debug command. Type 'help' for a list of commands.\n");
+    }
+}
+
 void execute_command(const char *command) {
     if (command == NULL || strlen(command) == 0) {
         fprintf(stderr, "Error: Empty command\n");
         return;
     }
 
+    if (debug_mode == DEBUG_STEP || (debug_mode == DEBUG_BREAK && breakpoint && strstr(command, breakpoint))) {
+        printf("Debugger: Paused at command: %s\n", command);
+        char *debug_cmd;
+        while ((debug_cmd = readline("debug> ")) != NULL) {
+            handle_debug_command(debug_cmd);
+            free(debug_cmd);
+            if (debug_mode == DEBUG_NONE) break;
+        }
+    }
+
     printf("Executing: %s\n", command);
+
+    strncpy(container_state.last_executed_command, command, MAX_COMMAND_LEN - 1);
+    container_state.last_executed_command[MAX_COMMAND_LEN - 1] = '\0';
+
+    // Update current directory if it's a cd command
+    if (strncmp(command, "cd ", 3) == 0) {
+        chdir(command + 3);
+        getcwd(container_state.current_directory, MAX_PATH_LEN);
+    }
 
     char *args[MAX_COMMAND_LEN / 2 + 1];
     char *command_copy = strdup(command);
@@ -231,11 +354,16 @@ void containerize_directory(const char *dir_path, const char *output_file, const
         exit(EXIT_FAILURE);
     }
 
-    File files[MAX_DEPENDENCIES];
+    File *files = malloc(sizeof(File) * MAX_LAYERS); // Allocate based on expected number
+    if (files == NULL) {
+        perror("Error allocating memory for files");
+        fclose(bin_file);
+        exit(EXIT_FAILURE);
+    }
+
     int num_files;
 
-    // Read files from directory
-
+    // Write config
     ContainerConfig config = {
         .name = "default_container",
         .memory_soft_limit = 384 * 1024 * 1024,  // 384 MB
@@ -253,6 +381,7 @@ void containerize_directory(const char *dir_path, const char *output_file, const
     }
     num_files = read_files(dir_path, files, config.container_uid, config.container_gid);
     if (num_files < 0) {
+        free(files);
         fclose(bin_file);
         exit(EXIT_FAILURE);
     }
@@ -268,6 +397,7 @@ void containerize_directory(const char *dir_path, const char *output_file, const
     DIR *dir = opendir(layers_dir);
     if (dir == NULL) {
         perror("Error opening layers directory");
+        free(files);
         fclose(bin_file);
         exit(EXIT_FAILURE);
     }
@@ -300,6 +430,7 @@ void containerize_directory(const char *dir_path, const char *output_file, const
         free(files[i].data);
     }
 
+    free(files);
     fclose(bin_file);
 }
 
@@ -408,6 +539,7 @@ char *get_ip_address() {
     struct sockaddr_in loopback;
     memset(&loopback, 0, sizeof(loopback));
     loopback.sin_family = AF_INET;
+    // Ping Google's DNS server
     loopback.sin_addr.s_addr = inet_addr("8.8.8.8");
     loopback.sin_port = htons(53);
 
@@ -730,7 +862,7 @@ void create_isolated_environment(FILE *bin_file, const char *bin_file_path, Cont
     }
 
     printf("\n=== Container Terminal ===\n");
-    printf("Enter commands (type 'exit' to quit):\n");
+    printf("Enter commands (type 'exit' to quit, 'debug' to enter debug mode):\n");
 
     // Start the network listener in a separate thread
     pthread_t network_thread;
@@ -753,6 +885,11 @@ void create_isolated_environment(FILE *bin_file, const char *bin_file_path, Cont
         command[strcspn(command, "\n")] = '\0';
 
         if (strcmp(command, "exit") == 0) break;
+        if (strcmp(command, "debug") == 0) {
+            debug_mode = DEBUG_STEP;
+            printf("Entered debug mode. Type 'help' for debug commands.\n");
+            continue;
+        }
 
         execute_command(command);
         printf("\n");
@@ -763,6 +900,12 @@ void create_isolated_environment(FILE *bin_file, const char *bin_file_path, Cont
     // Clean up the network thread
     pthread_cancel(network_thread);
     pthread_join(network_thread, NULL);
+
+    // Cleanup container state
+    for (int i = 0; i < container_state.num_env_vars; i++) {
+        free(container_state.environment_variables[i]);
+    }
+    free(container_state.environment_variables);
 
 }
 
@@ -899,10 +1042,224 @@ void upload_file(const char *filename, const char *username, const char *passwor
     curl_global_cleanup();
 }
 
+void convert_to_docker(const char *osxiec_file, const char *output_dir, const char *base_image, const char *custom_dockerfile) {
+    FILE *bin_file = fopen(osxiec_file, "rb");
+    if (bin_file == NULL) {
+        perror("Error opening osxiec container file");
+        return;
+    }
+
+    // Read container config
+    ContainerConfig config;
+    if (fread(&config, sizeof(ContainerConfig), 1, bin_file) != 1) {
+        perror("Error reading container config");
+        fclose(bin_file);
+        return;
+    }
+
+    // Create output directory
+    if (mkdir(output_dir, 0755) != 0 && errno != EEXIST) {
+        perror("Error creating output directory");
+        fclose(bin_file);
+        return;
+    }
+
+    FILE *dockerfile = NULL;
+    char dockerfile_path[MAX_PATH_LEN];
+
+    if (custom_dockerfile != NULL) {
+        char cmd[MAX_PATH_LEN * 2];
+        snprintf(cmd, sizeof(cmd), "cp %s %s/Dockerfile", custom_dockerfile, output_dir);
+        if (system(cmd) != 0) {
+            perror("Error copying custom Dockerfile");
+            fclose(bin_file);
+            return;
+        }
+    } else {
+        snprintf(dockerfile_path, sizeof(dockerfile_path), "%s/Dockerfile", output_dir);
+        dockerfile = fopen(dockerfile_path, "w");
+        if (dockerfile == NULL) {
+            perror("Error creating Dockerfile");
+            fclose(bin_file);
+            return;
+        }
+
+        fprintf(dockerfile, "FROM %s\n\nWORKDIR /app\n\n", base_image);
+    }
+
+    // Read number of layers
+    int num_layers;
+    if (fread(&num_layers, sizeof(int), 1, bin_file) != 1) {
+        perror("Error reading number of layers");
+        if (dockerfile) fclose(dockerfile);
+        fclose(bin_file);
+        return;
+    }
+
+    // Skip layer information for now
+    fseek(bin_file, num_layers * MAX_PATH_LEN, SEEK_CUR);
+
+    // Read number of files
+    int num_files;
+    if (fread(&num_files, sizeof(int), 1, bin_file) != 1) {
+        perror("Error reading number of files");
+        if (dockerfile) fclose(dockerfile);
+        fclose(bin_file);
+        return;
+    }
+
+    char buffer[CHUNK_SIZE];
+    for (int i = 0; i < num_files; i++) {
+        char file_name[MAX_PATH_LEN];
+        size_t file_size;
+
+        if (fread(file_name, sizeof(char), MAX_PATH_LEN, bin_file) != MAX_PATH_LEN ||
+            fread(&file_size, sizeof(size_t), 1, bin_file) != 1) {
+            perror("Error reading file metadata");
+            if (dockerfile) fclose(dockerfile);
+            fclose(bin_file);
+            return;
+        }
+
+        char file_path[MAX_PATH_LEN];
+        snprintf(file_path, sizeof(file_path), "%s/%s", output_dir, file_name);
+        FILE *out_file = fopen(file_path, "wb");
+        if (out_file == NULL) {
+            perror("Error creating file in output directory");
+            continue;
+        }
+
+        size_t remaining = file_size;
+        while (remaining > 0) {
+            size_t to_read = (remaining < CHUNK_SIZE) ? remaining : CHUNK_SIZE;
+            size_t bytes_read = fread(buffer, 1, to_read, bin_file);
+            if (bytes_read == 0) {
+                if (feof(bin_file)) {
+                    fprintf(stderr, "Unexpected end of file\n");
+                } else {
+                    perror("Error reading file data");
+                }
+                break;
+            }
+            fwrite(buffer, 1, bytes_read, out_file);
+            remaining -= bytes_read;
+        }
+
+        fclose(out_file);
+
+        if (custom_dockerfile == NULL) {
+            fprintf(dockerfile, "COPY %s /app/%s\n", file_name, file_name);
+        }
+    }
+
+    if (custom_dockerfile == NULL) {
+        fprintf(dockerfile, "\nENV MEMORY_SOFT_LIMIT=%ld\n", config.memory_soft_limit);
+        fprintf(dockerfile, "ENV MEMORY_HARD_LIMIT=%ld\n", config.memory_hard_limit);
+        fprintf(dockerfile, "ENV CPU_PRIORITY=%d\n", config.cpu_priority);
+
+        if (strcmp(config.network_mode, "host") == 0) {
+            fprintf(dockerfile, "\n# Using host network mode\n");
+        } else if (strcmp(config.network_mode, "bridge") == 0) {
+            fprintf(dockerfile, "\n# Using bridge network mode\n");
+        }
+
+        if (config.start_config[0] != '\0') {
+            fprintf(dockerfile, "\nCMD [\"/bin/sh\", \"-c\", \"while read cmd; do $cmd; done < %s\"]\n", config.start_config);
+        } else {
+            fprintf(dockerfile, "\nCMD [\"/bin/sh\"]\n");
+        }
+
+        fclose(dockerfile);
+    }
+
+    fclose(bin_file);
+
+    printf("Docker container created in %s\n", output_dir);
+    printf("To build: docker build -t {container-name} %s\n", output_dir);
+    printf("To run: docker run -it {container-name}\n");
+}
+
+void clean_container_dmgs() {
+    DIR *dir;
+    struct dirent *entry;
+    char file_path[MAX_PATH_LEN];
+
+    dir = opendir("/tmp");
+    if (dir == NULL) {
+        perror("Error opening /tmp directory");
+        return;
+    }
+
+    while ((entry = readdir(dir)) != NULL) {
+        if (strstr(entry->d_name, "container_") && strstr(entry->d_name, ".dmg")) {
+            snprintf(file_path, sizeof(file_path), "/tmp/%s", entry->d_name);
+
+            // Remove the file
+            if (remove(file_path) == 0) {
+                printf("Removed: %s\n", file_path);
+            } else {
+                perror("Error removing file");
+            }
+        }
+    }
+
+    closedir(dir);
+}
+
 int main(int argc, char *argv[]) {
+    PluginManager plugin_manager;
+    plugin_manager_init(&plugin_manager);
+
+    // Get the user's home directory
+    const char* home_dir = getenv("HOME");
+    if (home_dir == NULL) {
+        struct passwd* pwd = getpwuid(getuid());
+        if (pwd == NULL) {
+            fprintf(stderr, "Unable to determine home directory\n");
+            return EXIT_FAILURE;
+        }
+        home_dir = pwd->pw_dir;
+    }
+
+    // Define the plugin directory in the user's home
+    char plugin_dir[MAX_PATH_LEN];
+    snprintf(plugin_dir, sizeof(plugin_dir), "%s/.osxiec/plugins", home_dir);
+
+    // Check if the directory exists, if not, create it
+    struct stat st = {0};
+    if (stat(plugin_dir, &st) == -1) {
+        // Create the .osxiec directory first
+        char osxiec_dir[MAX_PATH_LEN];
+        snprintf(osxiec_dir, sizeof(osxiec_dir), "%s/.osxiec", home_dir);
+        if (mkdir(osxiec_dir, 0755) == -1 && errno != EEXIST) {
+            fprintf(stderr, "Error creating .osxiec directory: %s\n", strerror(errno));
+            // Continue execution, as the program can still function without plugins
+        }
+
+        // Now create the plugins directory
+        if (mkdir(plugin_dir, 0755) == -1) {
+            fprintf(stderr, "Error creating plugin directory %s: %s\n", plugin_dir, strerror(errno));
+            // Continue execution, as the program can still function without plugins
+        } else {
+            printf("Created plugin directory: %s\n", plugin_dir);
+        }
+    }
+
+    // Load plugins from the directory
+    DIR* dir = opendir(plugin_dir);
+    if (dir) {
+        struct dirent* entry;
+        while ((entry = readdir(dir)) != NULL) {
+            if (entry->d_type == DT_REG) { // Regular file
+                char plugin_path[MAX_PATH_LEN];
+                snprintf(plugin_path, sizeof(plugin_path), "%s/%s", plugin_dir, entry->d_name);
+                plugin_manager_load(&plugin_manager, plugin_path);
+            }
+        }
+        closedir(dir);
+    }
     if (argc < 2) {
-        fprintf(stderr, "Unknown command: %s\n"
-                        , argv[0]);
+        fprintf(stderr, "Unknown command: %s\n" , argv[0]);
         return EXIT_FAILURE;
     }
 
@@ -981,7 +1338,7 @@ int main(int argc, char *argv[]) {
         create_isolated_environment(bin_file, argv[2], &network);
         fclose(bin_file);
     } else if (strcmp(argv[1], "--version") == 0) {
-        printf("Osxiec version 0.2\n");
+        printf("Osxiec version 0.4\n");
     } else if (strcmp(argv[1], "-pull") == 0) {
         if (argc != 3) {
             printf("Usage: %s pull <file_name>\n", argv[0]);
@@ -1001,6 +1358,16 @@ int main(int argc, char *argv[]) {
             return EXIT_FAILURE;
         }
         upload_file(argv[2], argv[3], argv[4], argv[5]);
+    } else if (strcmp(argv[1], "-convert-to-docker") == 0) {
+        if (argc < 5 || argc > 6) {
+            fprintf(stderr, "Usage: %s -convert-to-docker <bin_file> <output_directory> <base_image> [custom_dockerfile]\n", argv[0]);
+            return EXIT_FAILURE;
+        }
+        const char *custom_dockerfile = (argc == 6) ? argv[5] : NULL;
+        convert_to_docker(argv[2], argv[3], argv[4], custom_dockerfile);
+    } else if (strcmp(argv[1], "-clean") == 0) {
+        clean_container_dmgs();
+        printf("Cleaned up container disk images from /tmp directory.\n");
     } else if (strcmp(argv[1], "-help") == 0) {
         printf("Available commands:\n");
         printf("  -contain <directory_path> <output_file>\n");
@@ -1010,6 +1377,8 @@ int main(int argc, char *argv[]) {
         printf("  -pull <file_name>\n");
         printf("  -search <search_term>\n");
         printf("  -upload <filename> <username> <password> <description>\n");
+        printf("  -convert-to-docker <bin_file> <output_directory> <base_image> [custom_dockerfile]\n");
+        printf("  -clean\n");
         printf("  --version\n");
         printf("  -help\n");
 
