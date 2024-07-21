@@ -1,11 +1,25 @@
-# OSXIEC: A Native Docker-like Solution for macOS by Okerew
+# Osxiec
 
+OSXIEC is a native docker-like solution for macOS developed by Okerew. It leverages native macOS features to provide containerization capabilities, albeit with some limitations compared to Docker.
 ![osxiec_icon](https://github.com/user-attachments/assets/d45e77d8-9532-482f-b4f6-874a301f4916)
 
-## Introduction
-
-OSXIEC is a native Docker-like solution for macOS developed by Okerew. It leverages native macOS features to provide containerization capabilities, albeit with some limitations compared to Docker. <a href="https://osxiec.glitch.me">Osxiec Hub</a>
-
+## Dependencies
+**HomeBrew for installing dependencies**
+```sh
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+```
+**Curl**
+```sh
+brew install curl
+```
+**Readline**
+```sh
+brew install readline
+```
+**Ninja for building**
+```sh
+brew install ninja
+```
 ## Installation
 
 1. **Download the Release**:
@@ -26,7 +40,6 @@ To update to a new release, remove the old executable and follow the installatio
 sudo rm /usr/local/bin/osxiec
 ```
 Then repeat steps 1, 2, and 3.
-
 
 ## Usage
 
@@ -68,23 +81,95 @@ osxiec -search {search_term_for_osxiec_hub}
 ```sh
 osxiec -upload {filename} {username} {password} {description}
 ```
+**Convert to Docker**
+```sh
+osxiec -convert-to-docker {bin_file} {output_directory} {base_image} [custom_dockerfile]
+```
+**Clean**
+```sh
+sudo osxiec -clean
+```
 **Help**
 ```sh
 osxiec -help
 ```
+
+## Debugging
+
+When in a container, you can use the following commands to debug the container.
+<br>
+To start debugging `debug`
+<br>
+Then you can use these commands
+___
+``` 
+step
+```
+which steps to the next command
+___
+``` 
+break <command>
+```
+Creates a breakpoint at the specified command
+___
+``` 
+print <var>
+```
+Prints the value of the specified variable of the container
+___
+``` 
+print
+```
+Prints the whole container state
+___
+``` 
+help
+```
+Shows what you can do
+___
+``` 
+continue
+```
+Continues execution of the container
+_____
+### <a href="https://osxiec.glitch.me">Osxiec Container Hub</a>
+This is a place where you can upload your containers to.
+___
 ## Building
 **Git clone the repository**
 ``` sh
-git clone https://github.com/Okerew/osxiec
+git clone https:/github.com/Okerew/osxiec
+```
+**Go to the directory**
+``` sh
+cd osxiec
 ```
 **Build the executable**
-```sh
-gcc -o osxiec osxiec.c -lcurl
+``` sh
+mkdir {build-directory}
+cd {build-directory}
+cmake -S .. -B . -G "Ninja"
+ninja
 ```
+
+## Plugins
+**Example plugin** can be seen in samples/sample_plugin.c, this should make you understand how osxiec loads plugins.
+
+**Build plugin**
+``` sh
+gcc -shared -fPIC -o {plugin_name}.so {plugin_name}.c  
+```
+
+**Install plugin**
+
+``` sh 
+sudo cp {plugin_name}.so  ~/.osxiec/plugins
+```
+After this on the execution of osxiec command the plugin will be loaded.
 ## Notes
 
 - **Not a Docker Replacement**:
-  While OSXIEC offers similar functionality to Docker, it lacks some advanced features of Docker. It is more supposed to be a quicker testing tool than docker on macos, it is not designed to replace it, just to test basic ideas and software.
+  While OSXIEC offers similar functionality to Docker, it lacks some advanced features of Docker. It is more supposed to be a quicker testing tool than docker on macOS, it is not designed to replace it, just to test basic ideas and software.
 
 - **macOS Only**:
   OSXIEC uses native macOS features and is not compatible with other operating systems.
@@ -98,7 +183,7 @@ gcc -o osxiec osxiec.c -lcurl
 - **Layer Configuration**:
   Ensure a layers folder exists with specified layers as shown in the example folder.
 - **Support**: Remember that not everything will work for example node won't work because it is making sys calls which spawn things outside the container.
-- **Temps**: If you need a lot of storage for the moment, and you used a container, delete the dmg in /tmp folder, note these images are also deleted each time the system restarts.
+- **Temps**: If you need a lot of storage for the moment, and you used a container use the clean command. 
 
 - **Why is chroot not used?**
   Chroot requires for SIP to be disabled, which causes many security risks, chroot can be easily exited by any process, using the normal macOS restrictions is way more secure, and reliable
