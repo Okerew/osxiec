@@ -140,7 +140,6 @@ _____
 ### <a href="https://osxiec.glitch.me">Osxiec Container Hub</a>
 This is a place where you can upload your containers to.
 ___
-___
 ### <a href="https://github.com/Okerew/osxiec_gui">Osxiec Gui</a>
 This is the source code for the gui version of osxiec.
 ![Screenshot 2024-07-24 at 12 05 58](https://github.com/user-attachments/assets/42d858e1-e4fd-4a82-b2e8-f86a7c35be38)
