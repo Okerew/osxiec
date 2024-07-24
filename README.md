@@ -1,6 +1,6 @@
 # Osxiec
 
-OSXIEC is a native docker-like solution for macOS developed by Okerew. It leverages native macOS features to provide containerization capabilities, albeit with some limitations compared to Docker.
+OSXIEC is a native docker-like solution for macOS developed by Okerew. It has it own containers. It leverages native macOS features to provide containerization capabilities, albeit with some limitations compared to Docker.
 
 <a href="https://youtu.be/CkJT0STyIZE" target="_blank">
  <img src="https://github.com/user-attachments/assets/d45e77d8-9532-482f-b4f6-874a301f4916" alt="Watch the video" />
