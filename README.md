@@ -35,7 +35,7 @@ brew install ninja
    ```sh
    sudo cp osxiec /usr/local/bin/
    ```
- 4. **If downloaed osxiec_gui**
+ 4. **If downloaded osxiec_gui**
    ```
    Copy app bundle to /Applications then run the app bundle or run osxiec.jar 
    ```
