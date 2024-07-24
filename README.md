@@ -27,6 +27,10 @@ brew install readline
 ```sh
 brew install ninja
 ```
+**Cmake for building**
+``` sh
+brew install cmake
+```
 ## Installation
 
 1. **Download the Release**:
