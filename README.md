@@ -24,7 +24,7 @@ brew install ninja
 ## Installation
 
 1. **Download the Release**:
-   Download the `osxiec.tar.gz` file from the releases section.
+   Download the `osxiec.tar.gz` or `osxiec_gui.tar.gz` file from the releases section.
 
 2. **Extract the Archive**:
    ```sh
@@ -35,12 +35,16 @@ brew install ninja
    ```sh
    sudo cp osxiec /usr/local/bin/
    ```
+ 4. **If downloaed osxiec_gui**
+   ```
+   Copy app bundle to /Applications then run the app bundle or run osxiec.jar 
+   ```
 
 To update to a new release, remove the old executable and follow the installation steps again:
 ```sh
 sudo rm /usr/local/bin/osxiec
 ```
-Then repeat steps 1, 2, and 3.
+Then repeat steps 1, 2, and 3 if using osxiec_gui also step 4.
 
 ## Usage
 
@@ -135,6 +139,10 @@ Continues execution of the container
 _____
 ### <a href="https://osxiec.glitch.me">Osxiec Container Hub</a>
 This is a place where you can upload your containers to.
+___
+___
+### <a href="https://github.com/Okerew/osxiec_gui">Osxiec Gui</a>
+This is the source code for the gui version of osxiec.
 ___
 ## Building
 **Git clone the repository**
