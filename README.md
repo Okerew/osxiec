@@ -43,7 +43,7 @@ brew install ninja
    ```
  4. **If downloaded osxiec_gui**
    ```
-   Copy app bundle to /Applications then run the app bundle or run osxiec.jar 
+   Copy app bundle to /Applications then run the app bundle or run osxiec.jar ( NOTE using the jar is the recommended way )
    ```
 
 To update to a new release, remove the old executable and follow the installation steps again:
