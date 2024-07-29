@@ -1,0 +1,4 @@
+source_dir=example
+container_file=test.bin
+network_name=test
+start_config=config.txt
