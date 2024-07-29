@@ -6,25 +6,26 @@
 #include <sandbox.h>
 #include <mach/mach.h>
 #include <pthread.h>
-#include <netinet/in.h>
 #include <arpa/inet.h>
 #include <spawn.h>
 #include <curl/curl.h>
 #include <readline/readline.h>
 #include "plugin_manager/plugin_manager.h"
 #include <pwd.h>
-
+#include <regex.h>
+#include "osxiec_script/osxiec_script.h"
 
 #define MAX_COMMAND_LEN 1024
 #define MAX_PATH_LEN 256
 #define MAX_FILE_SIZE 1024*1024*1024 // 1 GB
-#define MAX_LAYERS 20
+#define MAX_FILES 20
 #define PORT 3000
 #define MAX_CLIENTS 5
 #define DEBUG_NONE 0
 #define DEBUG_STEP 1
 #define DEBUG_BREAK 2
 #define CHUNK_SIZE 8192  // 8 KB chunks
+#define SHARED_FOLDER_PATH "/Volumes/SharedContainer"
 
 int port = PORT;
 
@@ -51,10 +52,6 @@ typedef struct {
     int vlan_id;
     char start_config[MAX_PATH_LEN];
 } ContainerConfig;
-
-typedef struct {
-    char layer_dir[MAX_PATH_LEN];
-} Layer;
 
 typedef struct {
     char name[MAX_PATH_LEN];
@@ -93,16 +90,27 @@ int read_files(const char *dir_path, File *files, uid_t uid, gid_t gid) {
     }
 
     while ((entry = readdir(dir)) != NULL) {
-        if (entry->d_type == DT_REG) {  // Check if it is a regular file
-            snprintf(file_path, sizeof(file_path), "%s/%s", dir_path, entry->d_name);
+        snprintf(file_path, sizeof(file_path), "%s/%s", dir_path, entry->d_name);
 
-            if (stat(file_path, &st) == 0) {
+        if (stat(file_path, &st) == 0) {
+            if (S_ISDIR(st.st_mode)) {
+                // Skip "." and ".."
+                if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+                    continue;
+                // Recursively read subdirectories
+                int sub_num_files = read_files(file_path, &files[num_files], uid, gid);
+                if (sub_num_files < 0) {
+                    closedir(dir);
+                    return -1;
+                }
+                num_files += sub_num_files;
+            } else if (S_ISREG(st.st_mode)) {
                 if (st.st_size > MAX_FILE_SIZE) {
                     fprintf(stderr, "File %s is too large (max %d bytes)\n", entry->d_name, MAX_FILE_SIZE);
                     continue;
                 }
 
-                strncpy(files[num_files].name, entry->d_name, MAX_PATH_LEN - 1);
+                strncpy(files[num_files].name, file_path, MAX_PATH_LEN - 1);
                 files[num_files].name[MAX_PATH_LEN - 1] = '\0';
                 files[num_files].size = st.st_size;
 
@@ -240,6 +248,18 @@ void handle_debug_command(char *command) {
     }
 }
 
+int is_subpath(const char *path, const char *base) {
+    char resolved_path[PATH_MAX];
+    char resolved_base[PATH_MAX];
+
+    if (realpath(path, resolved_path) == NULL || realpath(base, resolved_base) == NULL) {
+        return 0;
+    }
+
+    return strncmp(resolved_path, resolved_base, strlen(resolved_base)) == 0;
+}
+
+
 void execute_command(const char *command) {
     if (command == NULL || strlen(command) == 0) {
         fprintf(stderr, "Error: Empty command\n");
@@ -263,8 +283,29 @@ void execute_command(const char *command) {
 
     // Update current directory if it's a cd command
     if (strncmp(command, "cd ", 3) == 0) {
-        chdir(command + 3);
-        getcwd(container_state.current_directory, MAX_PATH_LEN);
+        const char *new_dir = command + 3;
+        const char container_root[] = "/Volumes/Container";
+        const char shared_folder_path[] = "/Volumes/SharedContainer";
+
+        char current_path[PATH_MAX];
+        if (getcwd(current_path, sizeof(current_path)) == NULL) {
+            perror("Failed to get current directory");
+            return;
+        }
+
+        if (is_subpath(new_dir, container_root) ||
+            is_subpath(new_dir, shared_folder_path) ||
+            (is_subpath(current_path, shared_folder_path) && strcmp(new_dir, container_root) == 0)) {
+            if (chdir(new_dir) == 0) {
+                getcwd(container_state.current_directory, MAX_PATH_LEN);
+                printf("Changed directory to: %s\n", container_state.current_directory);
+            } else {
+                perror("Failed to change directory");
+            }
+            } else {
+                fprintf(stderr, "Error: Cannot change directory outside of the container or shared folder.\n");
+            }
+        return;
     }
 
     char *args[MAX_COMMAND_LEN / 2 + 1];
@@ -346,6 +387,146 @@ void execute_start_config(const char *config_file) {
     fclose(file);
 }
 
+int is_base64(const char *str) {
+    regex_t regex;
+    int reti = regcomp(&regex, "^[A-Za-z0-9+/]+={0,2}$", REG_EXTENDED);
+    if (reti) {
+        return 0;
+    }
+    reti = regexec(&regex, str, 0, NULL, 0);
+    regfree(&regex);
+    return (reti == 0);
+}
+
+void security_scan(const char *bin_file) {
+    // Note this is a work in progress, so it make not always provide correct results
+    FILE *file = fopen(bin_file, "rb");
+    if (file == NULL) {
+        perror("Error opening binary file for security scan");
+        return;
+    }
+
+    ContainerConfig config;
+    if (fread(&config, sizeof(ContainerConfig), 1, file) != 1) {
+        perror("Error reading container config during security scan");
+        fclose(file);
+        return;
+    }
+
+    printf("Performing security scan on %s\n", bin_file);
+
+    // Check container configuration
+    if (config.container_uid == 0 || config.container_gid == 0) {
+        printf("HIGH RISK: Container is running as root. This is a significant security risk.\n");
+    }
+
+    if (strcmp(config.network_mode, "host") == 0) {
+        printf("HIGH RISK: Container is using host network mode. This can be a significant security risk.\n");
+        printf("The host network error will not be revelenant if you use the vlan network.\n");
+    }
+
+    // Check resource limits
+    if (config.memory_hard_limit == 0) {
+        printf("MEDIUM RISK: No hard memory limit set. This could lead to resource exhaustion.\n");
+    }
+
+    if (config.cpu_priority == 0) {
+        printf("LOW RISK: No CPU priority set. This could lead to resource contention.\n");
+    }
+
+    int num_files;
+    fread(&num_files, sizeof(int), 1, file);
+
+    regex_t regex;
+    regcomp(&regex, "^[a-zA-Z0-9._-]+$", REG_EXTENDED);
+
+    for (int i = 0; i < num_files; i++) {
+        char file_name[MAX_PATH_LEN];
+        size_t file_size;
+
+        fread(file_name, sizeof(char), MAX_PATH_LEN, file);
+        fread(&file_size, sizeof(size_t), 1, file);
+
+        // Check for potentially dangerous file names
+        if (strstr(file_name, "..") != NULL) {
+            printf("HIGH RISK: File '%s' contains potentially dangerous '..' in its path.\n", file_name);
+        }
+
+        if (regexec(&regex, file_name, 0, NULL, 0) != 0) {
+            printf("MEDIUM RISK: File '%s' has a potentially unsafe name.\n", file_name);
+        }
+
+        // Check for overly permissive file permissions
+        if (strstr(file_name, ".sh") != NULL || strstr(file_name, ".py") || strstr(file_name, ".lua") != NULL) {
+            printf("LOW RISK: Script file detected: '%s'. Ensure it has appropriate permissions.\n", file_name);
+        }
+
+        // Check for sensitive files
+        if (strstr(file_name, "id_rsa") != NULL || strstr(file_name, ".pem") != NULL) {
+            printf("HIGH RISK: Potential private key file detected: '%s'. Ensure it's properly secured.\n", file_name);
+        }
+
+        if (strstr(file_name, "password") != NULL || strstr(file_name, "secret") != NULL) {
+            printf("HIGH RISK: Potential sensitive file detected: '%s'. Ensure it's properly secured.\n", file_name);
+        }
+
+        // Scan file contents
+        char *buffer = malloc(file_size + 1);
+        if (buffer == NULL) {
+            perror("Failed to allocate memory for file content");
+            continue;
+        }
+
+        fread(buffer, 1, file_size, file);
+        buffer[file_size] = '\0';
+
+        // Check for insecure environment variables
+        if (strstr(buffer, "ENV_VAR_WITH_SENSITIVE_INFO") != NULL) {
+            printf("MEDIUM RISK: Insecure environment variable detected in file '%s'.\n", file_name);
+        }
+
+        // Check for insecure capabilities
+        if (strstr(buffer, "CAP_SYS_ADMIN") != NULL) {
+            printf("HIGH RISK: Insecure capability detected in file '%s'.\n", file_name);
+        }
+
+        // Check for insecure file permissions
+        if (strstr(buffer, "chmod 777") != NULL) {
+            printf("HIGH RISK: Insecure file permissions detected in file '%s'.\n", file_name);
+        }
+
+        // Check for hardcoded credentials
+        regex_t pwd_regex;
+        if (regcomp(&pwd_regex, "(password|api_key|secret)\\s*=\\s*['\"][^'\"]+['\"]", REG_EXTENDED | REG_ICASE) == 0) {
+            if (regexec(&pwd_regex, buffer, 0, NULL, 0) == 0) {
+                printf("HIGH RISK: Potential hardcoded credentials detected in file '%s'.\n", file_name);
+            }
+            regfree(&pwd_regex);
+        }
+
+        // Check for potential SQL injection vulnerabilities
+        if (strstr(buffer, "SELECT") != NULL && strstr(buffer, "WHERE") != NULL && strstr(buffer, "+") != NULL) {
+            printf("HIGH RISK: Potential SQL injection vulnerability detected in file '%s'.\n", file_name);
+        }
+
+        // Check for base64 encoded strings (potential hidden data)
+        char *token = strtok(buffer, " \t\n");
+        while (token != NULL) {
+            if (strlen(token) > 20 && is_base64(token)) {
+                printf("LOW RISK: Potential base64 encoded data detected in file '%s'. Verify if it contains sensitive information.\n", file_name);
+                break;
+            }
+            token = strtok(NULL, " \t\n");
+        }
+
+        free(buffer);
+    }
+
+    regfree(&regex);
+
+    printf("Security scan completed.\n");
+    fclose(file);
+}
 
 void containerize_directory(const char *dir_path, const char *output_file, const char *start_config_file) {
     FILE *bin_file = fopen(output_file, "wb");
@@ -354,7 +535,7 @@ void containerize_directory(const char *dir_path, const char *output_file, const
         exit(EXIT_FAILURE);
     }
 
-    File *files = malloc(sizeof(File) * MAX_LAYERS); // Allocate based on expected number
+    File *files = malloc(sizeof(File) * MAX_FILES);
     if (files == NULL) {
         perror("Error allocating memory for files");
         fclose(bin_file);
@@ -366,12 +547,12 @@ void containerize_directory(const char *dir_path, const char *output_file, const
     // Write config
     ContainerConfig config = {
         .name = "default_container",
-        .memory_soft_limit = 384 * 1024 * 1024,  // 384 MB
-        .memory_hard_limit = 512 * 1024 * 1024,  // 512 MB
-        .cpu_priority = 20,  // Normal priority
+        .memory_soft_limit = 384 * 1024 * 1024,
+        .memory_hard_limit = 512 * 1024 * 1024,
+        .cpu_priority = 20,
         .network_mode = "host",
-        .container_uid = 1000,  // Default unprivileged user ID
-        .container_gid = 1000   // Default unprivileged group ID
+        .container_uid = 1000,
+        .container_gid = 1000
     };
     if (start_config_file) {
         strncpy(config.start_config, start_config_file, MAX_PATH_LEN - 1);
@@ -379,6 +560,7 @@ void containerize_directory(const char *dir_path, const char *output_file, const
     } else {
         config.start_config[0] = '\0';
     }
+
     num_files = read_files(dir_path, files, config.container_uid, config.container_gid);
     if (num_files < 0) {
         free(files);
@@ -387,42 +569,8 @@ void containerize_directory(const char *dir_path, const char *output_file, const
     }
 
     fwrite(&config, sizeof(ContainerConfig), 1, bin_file);
-
-    // Read layers from the directory
-    Layer layers[MAX_LAYERS];
-    int num_layers = 0;
-    char layers_dir[MAX_PATH_LEN];
-    snprintf(layers_dir, sizeof(layers_dir), "%s/layers", dir_path);
-
-    DIR *dir = opendir(layers_dir);
-    if (dir == NULL) {
-        perror("Error opening layers directory");
-        free(files);
-        fclose(bin_file);
-        exit(EXIT_FAILURE);
-    }
-
-    struct dirent *entry;
-    while ((entry = readdir(dir)) != NULL && num_layers < MAX_LAYERS) {
-        if (entry->d_type == DT_DIR && entry->d_name[0] != '.') {
-            snprintf(layers[num_layers].layer_dir, sizeof(layers[num_layers].layer_dir), "%s/%s", layers_dir, entry->d_name);
-            num_layers++;
-        }
-    }
-    closedir(dir);
-
-    // Write number of layers
-    fwrite(&num_layers, sizeof(int), 1, bin_file);
-
-    // Write each layer directory to the binary file
-    for (int i = 0; i < num_layers; i++) {
-        fwrite(layers[i].layer_dir, sizeof(char), MAX_PATH_LEN, bin_file);
-    }
-
-    // Write number of files to the binary file
     fwrite(&num_files, sizeof(int), 1, bin_file);
 
-    // Write each file to the binary file
     for (int i = 0; i < num_files; i++) {
         fwrite(files[i].name, sizeof(char), MAX_PATH_LEN, bin_file);
         fwrite(&files[i].size, sizeof(size_t), 1, bin_file);
@@ -432,7 +580,10 @@ void containerize_directory(const char *dir_path, const char *output_file, const
 
     free(files);
     fclose(bin_file);
+
+    security_scan(output_file);
 }
+
 
 void *monitor_memory_usage(void *arg) {
     ContainerConfig *config = (ContainerConfig *)arg;
@@ -662,12 +813,6 @@ void enable_container_communication(ContainerNetwork *network) {
     system("pfctl -f /etc/pf.conf");
 }
 
-void apply_layer(const char *layer_dir, const char *target_dir) {
-    char command[MAX_COMMAND_LEN];
-    snprintf(command, sizeof(command), "cp -r %s/* %s", layer_dir, target_dir);
-    execute_command(command);
-}
-
 void handle_client(int client_socket) {
     char command[MAX_COMMAND_LEN];
     ssize_t bytes_received;
@@ -736,6 +881,50 @@ void start_network_listener() {
     }
 }
 
+void scale_container_resources(long memory_soft_limit, long memory_hard_limit, int cpu_priority) {
+    ContainerConfig config;
+    // Update the container configuration
+    config.memory_soft_limit = memory_soft_limit;
+    config.memory_hard_limit = memory_hard_limit;
+    config.cpu_priority = cpu_priority;
+
+    // Apply the new resource limits
+    apply_resource_limits(&config);
+
+    printf("Container resources.sh scaled:\n");
+    printf("Memory Soft Limit: %ld bytes\n", memory_soft_limit);
+    printf("Memory Hard Limit: %ld bytes\n", memory_hard_limit);
+    printf("CPU Priority: %d\n", cpu_priority);
+}
+
+void handle_script_command(const char *script_content) {
+    execute_script(script_content);
+}
+
+void handle_script_file(const char *filename) {
+    execute_script_file(filename);
+}
+
+void create_shared_folder() {
+    struct stat st = {0};
+    if (stat(SHARED_FOLDER_PATH, &st) == -1) {
+        mkdir(SHARED_FOLDER_PATH, 0755);
+    }
+}
+
+void create_directories(const char *file_path) {
+    char path[MAX_PATH_LEN];
+    strncpy(path, file_path, MAX_PATH_LEN);
+
+    for (char *p = path + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            mkdir(path, 0755);
+            *p = '/';
+        }
+    }
+}
+
 void create_isolated_environment(FILE *bin_file, const char *bin_file_path, ContainerNetwork *network) {
     ContainerConfig config;
     fread(&config, sizeof(ContainerConfig), 1, bin_file);
@@ -743,40 +932,33 @@ void create_isolated_environment(FILE *bin_file, const char *bin_file_path, Cont
     setup_network_isolation(&config, network);
     enable_container_communication(network);
 
-    int num_layers;
-    fread(&num_layers, sizeof(int), 1, bin_file);
-
-    Layer layers[MAX_LAYERS];
-    for (int i = 0; i < num_layers; i++) {
-        fread(layers[i].layer_dir, sizeof(char), MAX_PATH_LEN, bin_file);
-    }
-
     int num_files;
     fread(&num_files, sizeof(int), 1, bin_file);
+
+    // Create shared folder if it doesn't exist
+    char shared_folder_path[] = "/Volumes/SharedContainer";
+    mkdir(shared_folder_path, 0755);
 
     // Create and mount disk image for file system isolation
     char disk_image_path[MAX_PATH_LEN];
     snprintf(disk_image_path, sizeof(disk_image_path), "/tmp/container_disk_%d.dmg", getpid());
 
     char create_disk_command[MAX_COMMAND_LEN];
-    snprintf(create_disk_command, sizeof(create_disk_command),
-             "hdiutil create -size 1g -fs HFS+ -volname Container %s", disk_image_path);
+    snprintf(create_disk_command, sizeof(create_disk_command), "hdiutil create -size 1g -fs HFS+ -volname Container %s", disk_image_path);
     system(create_disk_command);
 
-    // Ensure the disk image has correct permissions
     chmod(disk_image_path, 0644);  // rw-r--r--
 
     char mount_command[MAX_COMMAND_LEN];
     snprintf(mount_command, sizeof(mount_command), "hdiutil attach %s", disk_image_path);
     system(mount_command);
 
-    // Use /Volumes/Container as the new container root
     char container_root[] = "/Volumes/Container";
 
-    // Apply layers
-    for (int i = 0; i < num_layers; i++) {
-        apply_layer(layers[i].layer_dir, container_root);
-    }
+    // Create a symbolic link to the shared folder
+    char shared_mount_point[MAX_PATH_LEN];
+    snprintf(shared_mount_point, sizeof(shared_mount_point), "%s/shared", container_root);
+    symlink(shared_folder_path, shared_mount_point);
 
     // Extract files
     for (int i = 0; i < num_files; i++) {
@@ -795,6 +977,9 @@ void create_isolated_environment(FILE *bin_file, const char *bin_file_path, Cont
         char file_path[MAX_PATH_LEN];
         snprintf(file_path, sizeof(file_path), "%s/%s", container_root, file.name);
 
+        // Ensure all necessary directories exist
+        create_directories(file_path);
+
         FILE *out_file = fopen(file_path, "wb");
         if (out_file == NULL) {
             perror("Error creating file in container");
@@ -805,35 +990,29 @@ void create_isolated_environment(FILE *bin_file, const char *bin_file_path, Cont
         fclose(out_file);
         free(file.data);
 
-        // Make the file executable and writable
         chmod(file_path, 0755);
     }
 
-    // Make the container root directory writable
     chmod(container_root, 0755);
 
-    // Change to container root
     if (chdir(container_root) != 0) {
         perror("Failed to change to container root directory");
         exit(1);
     }
 
-    // Set group ID first
     if (setgid(config.container_gid) != 0) {
         perror("Failed to set group ID");
         exit(1);
     }
 
-    // Set user ID
     if (setuid(config.container_uid) != 0) {
         perror("Failed to set user ID");
         exit(1);
     }
 
-    // Apply resource limits
     apply_resource_limits(&config);
 
-    // Setup sandbox profile
+    // Updated sandbox profile
     char sandbox_profile[1024];
     snprintf(sandbox_profile, sizeof(sandbox_profile),
              "(version 1)\
@@ -848,11 +1027,13 @@ void create_isolated_environment(FILE *bin_file, const char *bin_file_path, Cont
              (allow file-read* (subpath \"/usr/bin\"))\
              (allow file-read* (subpath \"/bin\"))\
              (allow file-read* (subpath \"/System\"))\
+             (allow file-read* (subpath \"%s\"))\
+             (allow file-write* (subpath \"%s\"))\
              (allow sysctl-read)\
              (allow mach-lookup)\
              (allow network-outbound (remote ip))\
              (allow network-inbound (local ip))",
-             container_root, container_root, bin_file_path);
+             container_root, container_root, bin_file_path, shared_mount_point, shared_mount_point);
 
     char *error;
     if (sandbox_init(sandbox_profile, 0, &error) != 0) {
@@ -862,7 +1043,7 @@ void create_isolated_environment(FILE *bin_file, const char *bin_file_path, Cont
     }
 
     printf("\n=== Container Terminal ===\n");
-    printf("Enter commands (type 'exit' to quit, 'debug' to enter debug mode):\n");
+    printf("Enter commands (type 'exit' to quit, help for help):\n");
 
     // Start the network listener in a separate thread
     pthread_t network_thread;
@@ -890,6 +1071,39 @@ void create_isolated_environment(FILE *bin_file, const char *bin_file_path, Cont
             printf("Entered debug mode. Type 'help' for debug commands.\n");
             continue;
         }
+        if (strncmp(command, "scale", 5) == 0) {
+            long memory_soft_limit, memory_hard_limit;
+            int cpu_priority;
+            if (sscanf(command, "scale %ld %ld %d", &memory_soft_limit, &memory_hard_limit, &cpu_priority) == 3) {
+                scale_container_resources(memory_soft_limit, memory_hard_limit, cpu_priority);
+            } else {
+                printf("Usage: scale <memory_soft_limit> <memory_hard_limit> <cpu_priority>\n");
+            }
+            continue;
+        }
+        if (strncmp(command, "xs", 6) == 0) {
+            char *script_content = command + 7;
+            handle_script_command(script_content);
+            continue;
+        }
+        if (strncmp(command, "osxs", 4) == 0) {
+            char *filename = command + 5;
+            while (isspace(*filename)) {
+                filename++;
+            }
+            handle_script_file(filename);
+            continue;
+        }
+
+        if (strcmp(command, "help") == 0) {
+            printf("Commands:\n");
+            printf("  exit: Exit the container\n");
+            printf("  debug: Enter debug mode\n");
+            printf("  scale <memory_soft_limit> <memory_hard_limit> <cpu_priority>: Set memory limits and CPU priority\n");
+            printf("  xs <script_content>: Execute a script in the container\n");
+            printf("  osxs <filename>: Execute a script file in the container\n");
+            continue;
+        }
 
         execute_command(command);
         printf("\n");
@@ -906,7 +1120,6 @@ void create_isolated_environment(FILE *bin_file, const char *bin_file_path, Cont
         free(container_state.environment_variables[i]);
     }
     free(container_state.environment_variables);
-
 }
 
 size_t write_data(void *ptr, size_t size, size_t nmemb, FILE *stream) {
@@ -1087,18 +1300,6 @@ void convert_to_docker(const char *osxiec_file, const char *output_dir, const ch
         fprintf(dockerfile, "FROM %s\n\nWORKDIR /app\n\n", base_image);
     }
 
-    // Read number of layers
-    int num_layers;
-    if (fread(&num_layers, sizeof(int), 1, bin_file) != 1) {
-        perror("Error reading number of layers");
-        if (dockerfile) fclose(dockerfile);
-        fclose(bin_file);
-        return;
-    }
-
-    // Skip layer information for now
-    fseek(bin_file, num_layers * MAX_PATH_LEN, SEEK_CUR);
-
     // Read number of files
     int num_files;
     if (fread(&num_files, sizeof(int), 1, bin_file) != 1) {
@@ -1206,6 +1407,79 @@ void clean_container_dmgs() {
     closedir(dir);
 }
 
+void deploy_container(const char *config_file, int deploy_port) {
+    FILE *file = fopen(config_file, "r");
+    if (file == NULL) {
+        perror("Error opening config file");
+        return;
+    }
+
+    char source_dir[MAX_PATH_LEN] = {0};
+    char container_file[MAX_PATH_LEN] = {0};
+    char network_name[MAX_PATH_LEN] = {0};
+    char start_config[MAX_PATH_LEN] = {0};
+
+    char line[MAX_COMMAND_LEN];
+    while (fgets(line, sizeof(line), file)) {
+        char *key = strtok(line, "=");
+        char *value = strtok(NULL, "\n");
+        if (key && value) {
+            if (strcmp(key, "source_dir") == 0) {
+                strncpy(source_dir, value, MAX_PATH_LEN - 1);
+            } else if (strcmp(key, "container_file") == 0) {
+                strncpy(container_file, value, MAX_PATH_LEN - 1);
+            } else if (strcmp(key, "network_name") == 0) {
+                strncpy(network_name, value, MAX_PATH_LEN - 1);
+            } else if (strcmp(key, "start_config") == 0) {
+                strncpy(start_config, value, MAX_PATH_LEN - 1);
+            }
+        }
+    }
+    fclose(file);
+
+    if (source_dir[0] == '\0' || container_file[0] == '\0' || network_name[0] == '\0') {
+        fprintf(stderr, "Error: Missing required configuration in config file\n");
+        return;
+    }
+
+    // Contain the directory
+    containerize_directory(source_dir, container_file, start_config[0] != '\0' ? start_config : NULL);
+    printf("Directory contents containerized into '%s'.\n", container_file);
+
+    // Load network configuration
+    ContainerNetwork network = load_container_network(network_name);
+
+    if (network.vlan_id == 0) {
+        fprintf(stderr, "Failed to load network configuration for %s\n", network_name);
+        return;
+    }
+
+    if (deploy_port != 0) {
+        // Set the global port variable
+        port = deploy_port;
+    }
+
+    // Run the container
+    FILE *bin_file = fopen(container_file, "rb");
+    if (bin_file == NULL) {
+        perror("Error opening binary file");
+        return;
+    }
+    create_isolated_environment(bin_file, container_file, &network);
+    fclose(bin_file);
+
+}
+
+void detach_container_images() {
+    printf("Detaching all Containes\n");
+    int result = system("hdiutil detach -force /Volumes/Container*");
+    if (result == 0) {
+        printf("All Container disk images detached successfully.\n");
+    } else {
+        fprintf(stderr, "Failed to detach some or all 'Container' disk images.\n");
+    }
+}
+
 int main(int argc, char *argv[]) {
     PluginManager plugin_manager;
     plugin_manager_init(&plugin_manager);
@@ -1311,7 +1585,7 @@ int main(int argc, char *argv[]) {
     }
     else if (strcmp(argv[1], "-run") == 0) {
         if (argc < 4) {
-            fprintf(stderr, "Usage: %s run <container_file> <network_name> [-port <port>]\n", argv[0]);
+            fprintf(stderr, "Usage: %s -run <container_file> <network_name> [-port <port>]\n", argv[0]);
             return EXIT_FAILURE;
         }
 
@@ -1338,10 +1612,10 @@ int main(int argc, char *argv[]) {
         create_isolated_environment(bin_file, argv[2], &network);
         fclose(bin_file);
     } else if (strcmp(argv[1], "--version") == 0) {
-        printf("Osxiec version 0.4\n");
+        printf("Osxiec version 0.6\n");
     } else if (strcmp(argv[1], "-pull") == 0) {
         if (argc != 3) {
-            printf("Usage: %s pull <file_name>\n", argv[0]);
+            printf("Usage: %s -pull <file_name>\n", argv[0]);
             return 1;
         }
         download_file(argv[2]);
@@ -1365,9 +1639,43 @@ int main(int argc, char *argv[]) {
         }
         const char *custom_dockerfile = (argc == 6) ? argv[5] : NULL;
         convert_to_docker(argv[2], argv[3], argv[4], custom_dockerfile);
+    } else if (strcmp(argv[1], "-deploy") == 0) {
+        if (argc < 3) {
+            fprintf(stderr, "Usage: %s -deploy <config_file> [-port <port>]\n", argv[0]);
+            return EXIT_FAILURE;
+        }
+        int deploy_port = 0;
+        for (int i = 3; i < argc; i++) {
+            if (strcmp(argv[i], "-port") == 0 && i + 1 < argc) {
+                deploy_port = atoi(argv[i + 1]);
+                break;
+            }
+        }
+        deploy_container(argv[2], deploy_port);
     } else if (strcmp(argv[1], "-clean") == 0) {
         clean_container_dmgs();
         printf("Cleaned up container disk images from /tmp directory.\n");
+    } else if (strcmp(argv[1], "-scan") == 0) {
+        if (argc != 3) {
+            fprintf(stderr, "Usage: %s -scan <bin_file>\n", argv[0]);
+            return EXIT_FAILURE;
+        }
+        security_scan(argv[2]);
+    } else if (strcmp(argv[1], "-term") == 0) {
+        system("osxiec_term");
+    } else if (strcmp(argv[1], "-deploym") == 0) {
+        char command[100] = "osxiec_deploy_multiple.sh";
+
+        if (argc > 2) {
+            for (int i = 2; i < argc; i++) {
+                strcat(command, " ");
+                strcat(command, argv[i]);
+            }
+        }
+
+        system(command);
+    } else if (strcmp(argv[1], "-detach") == 0) {
+        detach_container_images();
     } else if (strcmp(argv[1], "-help") == 0) {
         printf("Available commands:\n");
         printf("  -contain <directory_path> <output_file>\n");
@@ -1379,6 +1687,11 @@ int main(int argc, char *argv[]) {
         printf("  -upload <filename> <username> <password> <description>\n");
         printf("  -convert-to-docker <bin_file> <output_directory> <base_image> [custom_dockerfile]\n");
         printf("  -clean\n");
+        printf("  -deploy <config_file> [-port <port>]\n");
+        printf("  -scan <bin_file>\n");
+        printf("  -term\n");
+        printf("  -deploym\n");
+        printf("  -detach\n");
         printf("  --version\n");
         printf("  -help\n");
 
