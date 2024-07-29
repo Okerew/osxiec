@@ -7,7 +7,11 @@ set(CMAKE_C_STANDARD 11)
 add_executable(osxiec osxiec.c
         plugin_manager/plugin.h
         plugin_manager/plugin_manager.h
-        plugin_manager/plugin_manager.c)
+        plugin_manager/plugin_manager.c
+        osxiec_script/osxiec_script.h
+        osxiec_script/osxiec_script.c
+        osxiec.h
+)
 
 # Find and link CURL
 find_package(CURL REQUIRED)
