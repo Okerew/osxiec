@@ -1,0 +1,26 @@
+# This is an example script for the OSXIEC scripting language
+
+# Log the start of the script
+LOG Starting script for $container_name
+
+# Set container memory limits
+SET_MEMORY $mem_soft $mem_hard
+
+# Set CPU priority
+SET_CPU $cpu_priority
+
+# Execute a command
+EXECUTE echo "Container $container_name initialized"
+
+# Conditional execution
+SET status running
+IF status==running EXECUTE echo "Container is operational"
+
+# Sleep for 2 seconds
+SLEEP 2
+
+# Echo some information
+ECHO Container $container_name is configured with:
+ECHO - Memory limits: $mem_soft MB (soft) / $mem_hard MB (hard)
+ECHO - CPU priority: $cpu_priority
+
