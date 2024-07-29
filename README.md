@@ -1,6 +1,6 @@
 # Osxiec
 
-OSXIEC is a native docker-like solution for macOS developed by Okerew. It has it own containers. It leverages native macOS features to provide containerization capabilities, albeit with some limitations compared to Docker.
+OSXIEC is a native docker-like solution for macOS developed by Okerew. It leverages native macOS features to provide containerization capabilities, albeit with some limitations compared to Docker.
 
 <a href="https://youtu.be/CkJT0STyIZE" target="_blank">
  <img src="https://github.com/user-attachments/assets/d45e77d8-9532-482f-b4f6-874a301f4916" alt="Watch the video" />
@@ -23,6 +23,7 @@ brew install curl
 ```sh
 brew install readline
 ```
+### Build Dependencies
 **Ninja for building**
 ```sh
 brew install ninja
@@ -31,31 +32,34 @@ brew install ninja
 ``` sh
 brew install cmake
 ```
+**Golang for building**
+``` sh
+brew install golang
+```
 ## Installation
 
 1. **Download the Release**:
-   Download the `osxiec.tar.gz` or `osxiec_gui.tar.gz` file from the releases section.
+   Download the `osxiec_cli.tar.gz` and `osxiec_gui.tar.gz` if you want a gui app file from the releases section.
 
 2. **Extract the Archive**:
    ```sh
-   tar -xvzf osxiec.tar.gz
+   tar -xvzf osxiec_cli.tar.gz
+   ```
+   For gui version
+   ```sh
+   tar -xvzf osxiec_gui.tar.gz
    ```
 
-3. **Copy the Executable to PATH**:
+3. **Run installation script in the extracted cli directory**:
    ```sh
-   sudo cp osxiec /usr/local/bin/
+   sudo sh install.sh 
    ```
 4. **If downloaded osxiec_gui**
    ```
-   Copy app bundle to /Applications then run the app bundle or run osxiec.jar 
+   Copy app bundle from osxiec_gui.tar.gz to /Applications then run the app bundle or run osxiec.jar 
    ```
 
-To update to a new release, remove the old executable and follow the installation steps again:
-```sh
-sudo rm /usr/local/bin/osxiec
-```
-Then repeat steps 1, 2, and 3 if using osxiec_gui also step 4.
-
+To update to a new release, repeat steps 1, 2, and 3 if using osxiec_gui also step 4.
 ## Usage
 
 **Containerize a Directory**: containerizes a directory
@@ -100,9 +104,14 @@ osxiec -upload {filename} {username} {password} {description}
 ```sh
 osxiec -convert-to-docker {bin_file} {output_directory} {base_image} [custom_dockerfile]
 ```
-**Clean** this will clean the container volume images from /tmp 
+**Clean** this will clean the container volume images from /tmp
 ```sh
 sudo osxiec -clean
+```
+
+**Detach** detaches the container images
+```sh
+sudo osxiec -detach
 ```
 
 **Help** shows all the commands
@@ -110,54 +119,73 @@ sudo osxiec -clean
 osxiec -help
 ```
 
+**Deploy** deploys a container
+```sh
+sudo osxiec -deploy {path_to_config} -port {PORT_NUMBER}
+```
+
+**Scan** scans a container for security vulnerabilities
+```sh
+osxiec -scan {some_name.bin}
+```
+
+**Term** opens a terminal emulator specifically created for osxiec
+```sh
+osxiec -term
+```
+If you want you can use sudo for the emulator to have privileges.
+
+**Deploym** deploys multiple containers, this is a work in progress, for now it works mostly fine with start config
+```sh
+sudo osxiec -deploym {config_file}
+```
+
 ## Creating a container
-To create a container firstly make sure that the directory you want to contain is structured like this.
+Example structure
 ``` 
 [
     "container_name",
     {
-        "contents",
+        "some_content",
+        "subfolder1",
         "start_config_file"
-        
-        "layers": [
-            "Here will be the layers, for example:"
-             {
-                 "layer1": "here will be the 1 layer dir"
-             }
-             {
-                 "layer2": "here will be the 2 layer dir"
-             }
-        ]
     }    
     
 ]
 ```
-Then run the `osxiec -contain {directory_path} {container_name} {start_config_file}`
+To contain a directory run the `osxiec -contain {directory_path} {container_name} {start_config_file}`
 
+This will also scan the container for security vulnerabilities.
 ## Executing a container
 After creating a container or downloading one.
 **You can execute one with**
 
-`osxiec -execute {container_name}` 
+`osxiec -execute {container_name}`
 
 If you want you can also use a custom port with `-port {PORT_NUMBER}`
 
 **Run with vlan**
 
-If you have created a vlan network like said in the next point you can run the container with 
+If you have created a vlan network like said in the next point you can run the container with
 
-```osxiec -run {container_name} {network_name}``` 
+```osxiec -run {container_name} {network_name}```
 
 You can also add the port argument with `-port {PORT_NUMBER}`
 
 **When executing**
 <br>
-Normally it will start a listener which will allow it to communicate with other containers. 
+Normally it will start a listener which will allow it to communicate with other containers.
 ![Screenshot 2024-07-24 at 18 11 30](https://github.com/user-attachments/assets/50d308ce-60bc-4355-a60d-a05430cea2df)
 
 If you want to access the container terminal just press enter.
 ![Screenshot 2024-07-24 at 18 11 45](https://github.com/user-attachments/assets/32762bb2-0eb0-492e-9d04-1fcf1b8b80f8)
 
+## Container commands
+1. **help** shows all the commands
+2. **debug** debugs the container
+3. **scale** scales the resources of the container
+4. **osxs** Execute an osxs script file
+5. **xs** Execute an osxs script command
 ## Creating a vlan network
 To create a network you can run `osxiec -network create {network_name} {vlan_id}`
 
@@ -165,9 +193,9 @@ The network_name can be any string like "test" for example.
 
 The vlan id can be any number from 1-4094.
 
-For example `osxiec -network create test 6` 
+For example `osxiec -network create test 6`
 ## Converting to Docker
-**Create docker file** 
+**Create docker file**
 ``` dockerfile
 # Test Dockerfile for osxiec to Docker conversion
 
@@ -200,6 +228,98 @@ For this example
 ```sh
 osxiec -convert-to-docker {container_name} {output_directory} alpine:latest samples/dockerfile
 ```
+
+## Deploying
+**Create a config file**
+```
+source_dir=/path/to/source/directory
+container_file=/path/to/output/container.bin
+network_name=my_network
+start_config=/path/to/start_config.sh
+```
+**Deploy**
+```sh
+sudo osxiec -deploy {path_to_config_file} 
+``` 
+You can also use `-port {PORT_NUMBER}`
+
+**Deploym**
+you can also deploy multiple containers, this is a work in progress though.
+```sh
+sudo osxiec -deploym {config_file} {PORT_NUMBER1} {PORT_NUMBER2} etc.
+``` 
+**Config**
+
+```
+path_to_container1_config {network_name}
+path_to_container2_config {network_name}
+```
+
+## Osxiec Script
+Osxiec script is a scripting language created for managing osxiec containers.
+### Syntax
+**Set Memory**
+```sh
+SET_MEMORY {memory_soft} {memory_hard}
+```
+**Set CPU Priority**
+```sh
+SET_CPU {cpu_priority}
+```
+**Execute**
+```sh
+EXECUTE {command}
+```
+**Conditional Execution**
+```sh
+IF {condition} EXECUTE {command}
+```
+**Sleep**
+```sh
+SLEEP {seconds}
+```
+**Log**
+```sh
+LOG {message}
+```
+**Execute File**
+```sh
+EXECUTE_FILE {path_to_script}
+```
+**Set Variable**
+```sh
+SET {variable} {value}
+```
+
+**Example**
+```
+# This is an example script for the OSXIEC scripting language
+
+# Log the start of the script
+LOG Starting script for $container_name
+
+# Set container memory limits
+SET_MEMORY $mem_soft $mem_hard
+
+# Set CPU priority
+SET_CPU $cpu_priority
+
+# Execute a command
+EXECUTE echo "Container $container_name initialized"
+
+# Conditional execution
+SET status running
+IF status==running EXECUTE echo "Container is operational"
+
+# Sleep for 2 seconds
+SLEEP 2
+
+# Echo some information
+ECHO Container $container_name is configured with:
+ECHO - Memory limits: $mem_soft MB (soft) / $mem_hard MB (hard)
+ECHO - CPU priority: $cpu_priority
+```
+
 ## Debugging
 
 When in a container, you can use the following commands to debug the container.
@@ -257,7 +377,7 @@ git clone https://github.com/Okerew/osxiec.git
 ``` sh
 cd osxiec
 ```
-**Build the executable**
+**Build the osxiec executable**
 ``` sh
 mkdir {build-directory}
 cd {build-directory}
@@ -265,6 +385,52 @@ cmake -S .. -B . -G "Ninja"
 ninja
 ```
 
+**Build terminal**
+golang is required for this one
+``` sh
+cd term
+go build term.go
+```
+
+**Give permissions to scripts if needed**
+``` sh
+sudo chmod +x scripts/osxiec_deploy_multiple.sh
+sudo chmod +x scripts/install.sh
+```
+**Finalize**
+to make it work put all executables in a one folder, copy there install.sh and run it
+
+### Build java gui
+Git clone the gui
+```sh
+git clone https://github.com/Okerew/osxiec_gui.git
+```
+
+Go to the directory
+```sh
+cd osxiec_gui
+```
+Build the class
+```sh
+javac OsxiecApp.java
+```
+Build the jar
+```sh
+jar -cvfe osxiec.jar OsxiecApp OsxiecApp.class
+```
+
+Copy jar into app bundle, remove the previous one
+```sh
+cp osxiec.jar osxiec.app/Contents/Resources
+```
+If using the one from release, delete the previous one
+
+Copy the icon into Contents/Resources
+
+Finally, copy the run_app_bundle.sh into the bundle as osxiec_gui
+```sh
+cp run_app_bundle.sh osxiec.app/Contents/MacOS/osxiec_gui
+```
 ## Plugins
 **Example plugin** can be seen in samples/sample_plugin.c, this should make you understand how osxiec loads plugins.
 
@@ -283,21 +449,14 @@ After this on the execution of osxiec command the plugin will be loaded.
 
 - **Not a Docker Replacement**:
   While OSXIEC offers similar functionality to Docker, it lacks some advanced features of Docker. It is more supposed to be a quicker testing tool than docker on macOS, it is not designed to replace it, just to test basic ideas and software.
-
 - **macOS Only**:
   OSXIEC uses native macOS features and is not compatible with other operating systems.
-
 - **Isolation Limitations**:
-  Due to macOS limitations, complete isolation like in Linux is not possible. The contained directory will have some access to the outside environment, hence no config file is needed.
-
+  Due to macOS limitations, complete isolation like in Linux is not possible. The contained directory will have some access to the outside environment, you can have a start config file if needed.
 - **Supported Features**:
   Despite its limitations, OSXIEC provides isolation using namespaces, setuid, image layers, basic user process control, memory and CPU control, and special permissions using user IDs and group IDs, unpacking the image into a disk image(APFS), vlans.
-
-- **Layer Configuration**:
-  Ensure a layers folder exists with specified layers as shown in the example folder.
-- **Support**: Remember that not everything will work for example node won't work because it is making sys calls which spawn things outside the container.
+- **Support**: Remember that not everything will work fully for example node won't work fully because it is making sys calls which spawn things outside the container, in this example local things that do not rely on the repl server will work.
 - **Temps**: If you need a lot of storage for the moment, and you used a container use the clean command.
-
 - **Why is chroot not used?**
   Chroot requires for SIP to be disabled, which causes many security risks, chroot can be easily exited by any process, using the normal macOS restrictions is way more secure, and reliable
   it causes many permission issues, apple does not really like it and will probably make it harder to use it later on in the future.
