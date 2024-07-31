@@ -6,7 +6,7 @@ if [ "$EUID" -ne 0 ]
   exit
 fi
 
-files_to_copy=("osxiec" "osxiec_term" "osxiec_deploy_multiple.sh")
+files_to_copy=("osxiec" "osxiec_deploy_multiple.sh")
 
 # Delete existing files and copy the new ones to /usr/local/bin
 for file in "${files_to_copy[@]}"
