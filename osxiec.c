@@ -13,6 +13,7 @@
 #include "plugin_manager/plugin_manager.h"
 #include <pwd.h>
 #include <regex.h>
+#include <stdbool.h>
 #include "osxiec_script/osxiec_script.h"
 
 #define MAX_COMMAND_LEN 1024
@@ -26,6 +27,11 @@
 #define DEBUG_BREAK 2
 #define CHUNK_SIZE 8192  // 8 KB chunks
 #define SHARED_FOLDER_PATH "/Volumes/SharedContainer"
+#define CPU_USAGE_THRESHOLD 80.0 // 80% CPU usage
+#define MEMORY_USAGE_THRESHOLD 80.0 // 80% of soft limit
+#define MAX_CPU_PRIORITY 39 // Maximum nice value
+#define MIN_CPU_PRIORITY -20 // Minimum nice value
+#define MAX_MEMORY_LIMIT 2147483648 // 2 GB max memory limit
 
 int port = PORT;
 
@@ -208,7 +214,6 @@ void print_container_state() {
     printf("  Current Directory: %s\n", container_state.current_directory);
     printf("  Last Executed Command: %s\n", container_state.last_executed_command);
     printf("  Number of Processes: %d\n", container_state.num_processes);
-    printf("  Memory Usage: %ld KB\n", container_state.memory_usage);
     printf("  Network Status: %s\n", container_state.network_status);
     printf("  Environment Variables:\n");
     for (int i = 0; i < container_state.num_env_vars; i++) {
@@ -673,6 +678,17 @@ void create_and_save_container_network(const char *name, int vlan_id) {
     printf("Created and saved network %s with VLAN ID %d\n", network.name, network.vlan_id);
 }
 
+void remove_container_network(const char *name) {
+    char filename[MAX_PATH_LEN];
+    snprintf(filename, sizeof(filename), "/tmp/network_%s.conf", name);
+
+    if (remove(filename) == 0) {
+        printf("Removed network %s\n", name);
+    } else {
+        perror("Failed to remove network");
+    }
+}
+
 void add_container_to_network(ContainerNetwork *network, const char *container_name) {
     if (network->num_containers < MAX_CLIENTS) {
         strncpy(network->container_names[network->num_containers], container_name, MAX_PATH_LEN - 1);
@@ -925,6 +941,107 @@ void create_directories(const char *file_path) {
     }
 }
 
+double get_cpu_usage() {
+    static clock_t last_cpu_time = 0;
+    static struct timeval last_wall_time = {0};
+
+    struct rusage usage;
+    struct timeval current_wall_time;
+
+    getrusage(RUSAGE_SELF, &usage);
+    gettimeofday(&current_wall_time, NULL);
+
+    clock_t current_cpu_time = usage.ru_utime.tv_sec * 1000000 + usage.ru_utime.tv_usec +
+                               usage.ru_stime.tv_sec * 1000000 + usage.ru_stime.tv_usec;
+
+    double cpu_usage = 0.0;
+    if (last_cpu_time != 0) {
+        long wall_time_diff = (current_wall_time.tv_sec - last_wall_time.tv_sec) * 1000000 +
+                              (current_wall_time.tv_usec - last_wall_time.tv_usec);
+
+        long cpu_time_diff = current_cpu_time - last_cpu_time;
+
+        cpu_usage = (cpu_time_diff * 100.0) / wall_time_diff;
+    }
+
+    last_cpu_time = current_cpu_time;
+    last_wall_time = current_wall_time;
+
+    return cpu_usage;
+}
+
+void *auto_scale_resources(void *arg) {
+    ContainerConfig *config = (ContainerConfig *)arg;
+    struct rusage usage;
+    long memory_increment = 100 * 1024 * 1024; // 100 MB
+    int cpu_priority_increment = 1;
+    int scale_count = 0;
+
+    while (1) {
+        if (getrusage(RUSAGE_SELF, &usage) == 0) {
+            long memory_used = usage.ru_maxrss;
+            double memory_usage_percent = (memory_used * 100.0) / config->memory_soft_limit;
+            double cpu_usage = get_cpu_usage();
+
+            bool should_scale = false;
+
+            if (memory_usage_percent > MEMORY_USAGE_THRESHOLD && config->memory_soft_limit < MAX_MEMORY_LIMIT) {
+                config->memory_soft_limit += memory_increment;
+                config->memory_hard_limit += memory_increment;
+                should_scale = true;
+            }
+
+            if (cpu_usage > CPU_USAGE_THRESHOLD && config->cpu_priority > MIN_CPU_PRIORITY) {
+                config->cpu_priority = (config->cpu_priority > MIN_CPU_PRIORITY + cpu_priority_increment)
+                    ? config->cpu_priority - cpu_priority_increment
+                    : MIN_CPU_PRIORITY;
+                should_scale = true;
+            }
+
+            if (should_scale) {
+                apply_resource_limits(config);
+                scale_count++;
+
+                printf("Auto-scaled resources (Count: %d):\n", scale_count);
+                printf("Memory Usage: %.2f%% (%ld / %ld bytes)\n",
+                       memory_usage_percent, memory_used, config->memory_soft_limit);
+                printf("CPU Usage: %.2f%%\n", cpu_usage);
+                printf("New Memory Soft Limit: %ld bytes\n", config->memory_soft_limit);
+                printf("New Memory Hard Limit: %ld bytes\n", config->memory_hard_limit);
+                printf("New CPU Priority: %d\n", config->cpu_priority);
+            }
+        }
+
+        sleep(5);
+    }
+}
+
+void start_auto_scaling(ContainerConfig *config) {
+    pthread_t auto_scale_thread;
+    if (pthread_create(&auto_scale_thread, NULL, auto_scale_resources, (void *)config) != 0) {
+        perror("Failed to create auto-scaling thread");
+    } else {
+        printf("Auto-scaling started\n");
+    }
+}
+
+void print_current_resource_usage(ContainerConfig *config) {
+    struct rusage usage;
+    if (getrusage(RUSAGE_SELF, &usage) == 0) {
+        long memory_used = usage.ru_maxrss;
+        double memory_usage_percent = (memory_used * 100.0) / config->memory_soft_limit;
+        double cpu_usage = get_cpu_usage();
+
+        printf("Current Resource Usage:\n");
+        printf("Memory Usage: %.2f%% (%ld / %ld bytes)\n",
+               memory_usage_percent, memory_used, config->memory_soft_limit);
+        printf("CPU Usage: %.2f%%\n", cpu_usage);
+        printf("CPU Priority: %d\n", config->cpu_priority);
+    } else {
+        perror("Failed to get resource usage");
+    }
+}
+
 void create_isolated_environment(FILE *bin_file, const char *bin_file_path, ContainerNetwork *network) {
     ContainerConfig config;
     fread(&config, sizeof(ContainerConfig), 1, bin_file);
@@ -1095,6 +1212,16 @@ void create_isolated_environment(FILE *bin_file, const char *bin_file_path, Cont
             continue;
         }
 
+        if (strcmp(command, "autoscale") == 0) {
+            start_auto_scaling(&config);
+            continue;
+        }
+
+        if (strcmp(command, "status") == 0) {
+            print_current_resource_usage(&config);
+            continue;
+        }
+
         if (strcmp(command, "help") == 0) {
             printf("Commands:\n");
             printf("  exit: Exit the container\n");
@@ -1102,6 +1229,9 @@ void create_isolated_environment(FILE *bin_file, const char *bin_file_path, Cont
             printf("  scale <memory_soft_limit> <memory_hard_limit> <cpu_priority>: Set memory limits and CPU priority\n");
             printf("  xs <script_content>: Execute a script in the container\n");
             printf("  osxs <filename>: Execute a script file in the container\n");
+            printf("  autoscale: Start automatic resource scaling\n");
+            printf("  status: Print current resource usage\n");
+            printf("  help: Print this help message\n");
             continue;
         }
 
@@ -1574,14 +1704,28 @@ int main(int argc, char *argv[]) {
         create_isolated_environment(bin_file, argv[2], &dummy_network);
         fclose(bin_file);
 
-    } else if (strcmp(argv[1], "-network") == 0 && strcmp(argv[2], "create") == 0) {
-        if (argc < 5) {
-            fprintf(stderr, "Usage: %s -network create <name> <vlan_id>\n", argv[0]);
+    } else if (strcmp(argv[1], "-network") == 0) {
+        if (argc < 4) {
+            fprintf(stderr, "Usage: %s -network <create|remove> <name> [vlan_id]\n", argv[0]);
             return EXIT_FAILURE;
         }
-        create_and_save_container_network(argv[3], atoi(argv[4]));
-        ContainerNetwork network = load_container_network(argv[3]);
-        setup_pf_rules(&network);
+
+        if (strcmp(argv[2], "create") == 0) {
+            if (argc < 5) {
+                fprintf(stderr, "Usage: %s -network create <name> <vlan_id>\n", argv[0]);
+                return EXIT_FAILURE;
+            }
+            create_and_save_container_network(argv[3], atoi(argv[4]));
+            ContainerNetwork network = load_container_network(argv[3]);
+            setup_pf_rules(&network);
+        }
+        else if (strcmp(argv[2], "remove") == 0) {
+            remove_container_network(argv[3]);
+        }
+        else {
+            fprintf(stderr, "Unknown network command: %s\n", argv[2]);
+            return EXIT_FAILURE;
+        }
     }
     else if (strcmp(argv[1], "-run") == 0) {
         if (argc < 4) {
@@ -1612,7 +1756,7 @@ int main(int argc, char *argv[]) {
         create_isolated_environment(bin_file, argv[2], &network);
         fclose(bin_file);
     } else if (strcmp(argv[1], "--version") == 0) {
-        printf("Osxiec version 0.6\n");
+        printf("Osxiec version 0.61\n");
     } else if (strcmp(argv[1], "-pull") == 0) {
         if (argc != 3) {
             printf("Usage: %s -pull <file_name>\n", argv[0]);
@@ -1661,8 +1805,6 @@ int main(int argc, char *argv[]) {
             return EXIT_FAILURE;
         }
         security_scan(argv[2]);
-    } else if (strcmp(argv[1], "-term") == 0) {
-        system("osxiec_term");
     } else if (strcmp(argv[1], "-deploym") == 0) {
         char command[100] = "osxiec_deploy_multiple.sh";
 
@@ -1679,22 +1821,35 @@ int main(int argc, char *argv[]) {
     } else if (strcmp(argv[1], "-help") == 0) {
         printf("Available commands:\n");
         printf("  -contain <directory_path> <output_file>\n");
+        printf("Contains a directory into a container file\n");
         printf("  -execute <directory_path> [-port <port>]\n");
-        printf("  -network create <name> <vlan_id>\n");
+        printf("Executes a container file\n");
+        printf("  -network <create|remove> <name> [vlan_id>\n");
+        printf("Manages the vlan network\n");
         printf("  -run <container_file> <network_name> [-port <port>]\n");
+        printf("Runs a container file with a vlan network\n");
         printf("  -pull <file_name>\n");
+        printf("Pulls a container from Osxiec Hub\n");
         printf("  -search <search_term>\n");
+        printf("Searches for a container in Osxiec Hub\n");
         printf("  -upload <filename> <username> <password> <description>\n");
+        printf("Uploads a file to Osxiec Hub\n");
         printf("  -convert-to-docker <bin_file> <output_directory> <base_image> [custom_dockerfile]\n");
+        printf("Converts a binary file to a docker image\n");
         printf("  -clean\n");
+        printf("Cleans up container disk images from /tmp directory.\n");
         printf("  -deploy <config_file> [-port <port>]\n");
+        printf("Deploys a container from a config file\n");
         printf("  -scan <bin_file>\n");
-        printf("  -term\n");
+        printf("Scans a binary file for vulnerabilities\n");
         printf("  -deploym\n");
+        printf("Deploys multiple containers from a config file\n");
         printf("  -detach\n");
+        printf("Detaches container from /Volumes\n");
         printf("  --version\n");
+        printf("Prints the version of osxiec\n");
         printf("  -help\n");
-
+        printf("Prints this help message\n");
     } else {
         fprintf(stderr, "Unknown command: %s\n", argv[1]);
         return EXIT_FAILURE;
