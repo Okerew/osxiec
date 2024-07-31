@@ -111,7 +111,7 @@ sudo osxiec -clean
 
 **Detach** detaches the container images
 ```sh
-sudo osxiec -detach
+osxiec -detach
 ```
 
 **Help** shows all the commands
@@ -128,12 +128,6 @@ sudo osxiec -deploy {path_to_config} -port {PORT_NUMBER}
 ```sh
 osxiec -scan {some_name.bin}
 ```
-
-**Term** opens a terminal emulator specifically created for osxiec
-```sh
-osxiec -term
-```
-If you want you can use sudo for the emulator to have privileges.
 
 **Deploym** deploys multiple containers, this is a work in progress, for now it works mostly fine with start config
 ```sh
@@ -186,6 +180,8 @@ If you want to access the container terminal just press enter.
 3. **scale** scales the resources of the container
 4. **osxs** Execute an osxs script file
 5. **xs** Execute an osxs script command
+6. **autoscale** automatically scales the resources of the container
+7. **status** shows the status of the container
 ## Creating a vlan network
 To create a network you can run `osxiec -network create {network_name} {vlan_id}`
 
@@ -368,6 +364,9 @@ This is the source code for the gui version of osxiec.
 ![Screenshot 2024-07-24 at 12 05 58](https://github.com/user-attachments/assets/42d858e1-e4fd-4a82-b2e8-f86a7c35be38)
 
 ___
+### <a href="https://github.com/Okerew/osxiec_terminal.git">Osxiec Terminal</a>
+A terminal emulator specifically created for osxiec
+___
 ## Building
 **Git clone the repository**
 ``` sh
@@ -448,7 +447,7 @@ After this on the execution of osxiec command the plugin will be loaded.
 ## Notes
 
 - **Not a Docker Replacement**:
-  While OSXIEC offers similar functionality to Docker, it lacks some advanced features of Docker. It is more supposed to be a quicker testing tool than docker on macOS, it is not designed to replace it, just to test basic ideas and software.
+  While OSXIEC offers similar functionality to Docker, it lacks some advanced features of Docker. It is more supposed to be a quicker testing tool than docker on macOS, it is not designed to replace it, just to test basic ideas and software, distribute macOS software.
 - **macOS Only**:
   OSXIEC uses native macOS features and is not compatible with other operating systems.
 - **Isolation Limitations**:
@@ -458,7 +457,7 @@ After this on the execution of osxiec command the plugin will be loaded.
 - **Support**: Remember that not everything will work fully for example node won't work fully because it is making sys calls which spawn things outside the container, in this example local things that do not rely on the repl server will work.
 - **Temps**: If you need a lot of storage for the moment, and you used a container use the clean command.
 - **Why is chroot not used?**
-  Chroot requires for SIP to be disabled, which causes many security risks, chroot can be easily exited by any process, using the normal macOS restrictions is way more secure, and reliable
-  it causes many permission issues, apple does not really like it and will probably make it harder to use it later on in the future.
+  Chroot requires for SIP to be disabled, which causes many security risks, chroot can be easily exited by any process, using the normal macOS restrictions is way more secure, reliable,
+  having it disabled causes many permission issues.
 - **Sandbox deprecation error** yes I know that sandbox innit is deprecated but there isn't really an alternative for it unless I would use xcode and there is no way I am using it to rebuild this.
 ---
