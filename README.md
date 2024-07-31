@@ -80,6 +80,10 @@ sudo osxiec -execute {some_name} -port {PORT_NUMBER}
 ```sh
 sudo osxiec -network create {network_name} {vlan_id}
 ```
+**Remove a vlan network** removes a vlan network
+```sh
+sudo osxiec -network remove {network_name} {vlan_id}
+```
 **Run with vlan config** run with vlan config
 ``` sh
 sudo osxiec -run {some_name} {network_name} -port {PORT_NUMBER}
