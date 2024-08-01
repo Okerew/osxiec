@@ -1132,25 +1132,29 @@ void create_isolated_environment(FILE *bin_file, const char *bin_file_path, Cont
     // Updated sandbox profile
     char sandbox_profile[1024];
     snprintf(sandbox_profile, sizeof(sandbox_profile),
-             "(version 1)\
-             (deny default)\
-             (allow process-exec)\
-             (allow process-fork)\
-             (allow file-read*)\
-             (allow file-write* (subpath \"%s\"))\
-             (allow file-read* (subpath \"%s\"))\
-             (allow file-read* (literal \"%s\"))\
-             (allow file-read* (subpath \"/usr/lib\"))\
-             (allow file-read* (subpath \"/usr/bin\"))\
-             (allow file-read* (subpath \"/bin\"))\
-             (allow file-read* (subpath \"/System\"))\
-             (allow file-read* (subpath \"%s\"))\
-             (allow file-write* (subpath \"%s\"))\
-             (allow sysctl-read)\
-             (allow mach-lookup)\
-             (allow network-outbound (remote ip))\
-             (allow network-inbound (local ip))",
-             container_root, container_root, bin_file_path, shared_mount_point, shared_mount_point);
+        "(version 1)"
+        "(deny default)"
+        "(allow process-fork)"
+        "(allow file-read*)"
+        "(allow file-write* (subpath \"%s\"))"
+        "(allow file-read* (subpath \"%s\"))"
+        "(allow file-read* (literal \"%s\"))"
+        "(allow file-read* (subpath \"/usr/lib\"))"
+        "(allow file-read* (subpath \"/usr/bin\"))"
+        "(allow file-read* (subpath \"/bin\"))"
+        "(allow file-read* (subpath \"/System\"))"
+        "(allow file-read* (subpath \"%s\"))"
+        "(allow file-write* (subpath \"%s\"))"
+        "(allow sysctl-read)"
+        "(allow mach-lookup)"
+        "(allow network-outbound (remote ip))"
+        "(allow network-inbound (local ip))"
+        "(allow process-exec (subpath \"/usr/bin\"))"
+        "(allow process-exec (subpath \"/bin\"))"
+        "(allow process-exec (subpath \"%s\"))",
+        container_root, container_root, bin_file_path,
+        shared_mount_point, shared_mount_point, container_root
+    );
 
     char *error;
     if (sandbox_init(sandbox_profile, 0, &error) != 0) {
@@ -1756,7 +1760,7 @@ int main(int argc, char *argv[]) {
         create_isolated_environment(bin_file, argv[2], &network);
         fclose(bin_file);
     } else if (strcmp(argv[1], "--version") == 0) {
-        printf("Osxiec version 0.61\n");
+        printf("Osxiec version 0.62\n");
     } else if (strcmp(argv[1], "-pull") == 0) {
         if (argc != 3) {
             printf("Usage: %s -pull <file_name>\n", argv[0]);
