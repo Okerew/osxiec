@@ -135,18 +135,40 @@ sudo osxiec -deploym {config_file}
 ```
 
 ## Creating a container
-Example structure
+Make sure to include any dependencies or executables you can optain these by searching for where a dependency or executable is located and copying it along with it's dependencies.
+
+
+**Example structure**
 ``` 
 [
     "container_name",
     {
         "some_content",
-        "subfolder1",
+        "subfolder1" [
+           executable1
+           "some_content"
+         ]
         "start_config_file"
+        executable2
+        "some_dependency"
     }    
-    
 ]
 ```
+<br>
+
+**Script Example:**
+For example if I you have a node project make sure to include somewhere the node executable in the directory you want to contain, then run the script with the node executable.
+
+``` js
+console.log("Hello World")
+```
+
+Do `path/to/node_executable_in_container/ script.js`
+
+<br>
+
+**Containing**
+
 To contain a directory run the `osxiec -contain {directory_path} {container_name} {start_config_file}`
 
 This will also scan the container for security vulnerabilities.
@@ -173,6 +195,7 @@ Normally it will start a listener which will allow it to communicate with other 
 
 If you want to access the container terminal just press enter.
 ![Screenshot 2024-07-24 at 18 11 45](https://github.com/user-attachments/assets/32762bb2-0eb0-492e-9d04-1fcf1b8b80f8)
+
 
 ## Container commands
 1. **help** shows all the commands
