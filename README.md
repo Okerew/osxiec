@@ -32,10 +32,6 @@ brew install ninja
 ``` sh
 brew install cmake
 ```
-**Golang for building**
-``` sh
-brew install golang
-```
 ## Installation
 
 1. **Download the Release**:
