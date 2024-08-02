@@ -21,7 +21,6 @@ typedef struct {
 Variable variables[MAX_VARIABLES];
 int variable_count = 0;
 
-// Function prototypes
 void set_variable(const char *name, const char *value);
 char *get_variable(const char *name);
 void replace_variables(char *line);
@@ -69,6 +68,45 @@ void execute_script_file(const char *filename) {
     }
 
     fclose(file);
+}
+
+void execute_for_loop(char args[MAX_ARGS][MAX_COMMAND_LEN], int arg_count) {
+    char var_name[MAX_VAR_NAME];
+    int start, end, step;
+    char loop_body[MAX_COMMAND_LEN] = "";
+
+    sscanf(args[0], "%[^=]=", var_name);
+    start = atoi(strchr(args[0], '=') + 1);
+    end = atoi(args[2]);
+    step = (arg_count > 5 && strcmp(args[3], "STEP") == 0) ? atoi(args[4]) : 1;
+
+    int body_start = (arg_count > 5 && strcmp(args[3], "STEP") == 0) ? 5 : 3;
+    for (int i = body_start; i < arg_count; i++) {
+        strcat(loop_body, args[i]);
+        if (i < arg_count - 1) strcat(loop_body, " ");
+    }
+
+    char value[MAX_VAR_VALUE];
+    for (int i = start; i < end; i += step) {
+        snprintf(value, sizeof(value), "%d", i);
+        set_variable(var_name, value);
+        execute_cs_command(loop_body);
+    }
+}
+
+void execute_while_loop(char args[MAX_ARGS][MAX_COMMAND_LEN], int arg_count) {
+    char condition[MAX_COMMAND_LEN];
+    char loop_body[MAX_COMMAND_LEN] = "";
+
+    strcpy(condition, args[0]);
+    for (int i = 1; i < arg_count; i++) {
+        strcat(loop_body, args[i]);
+        if (i < arg_count - 1) strcat(loop_body, " ");
+    }
+
+    while (evaluate_condition(condition)) {
+        execute_cs_command(loop_body);
+    }
 }
 
 void execute_cs_command(const char *command) {
@@ -123,21 +161,52 @@ void execute_cs_command(const char *command) {
     else if (strcmp(cmd, "SET") == 0 && arg_count == 2) {
         set_variable(args[0], args[1]);
     }
-    else if (strcmp(cmd, "IF") == 0 && arg_count >= 2) {
-        if (evaluate_condition(args[0])) {
-            char subcommand[MAX_COMMAND_LEN] = "";
-            for (int i = 1; i < arg_count; i++) {
-                strcat(subcommand, args[i]);
-                if (i < arg_count - 1) strcat(subcommand, " ");
+    else if (strcmp(cmd, "IF") == 0 && arg_count >= 3) {
+        char true_command[MAX_COMMAND_LEN] = "";
+        char false_command[MAX_COMMAND_LEN] = "";
+        int else_index = -1;
+
+        // Find the ELSE keyword
+        for (int i = 1; i < arg_count; i++) {
+            if (strcmp(args[i], "ELSE") == 0) {
+                else_index = i;
+                break;
             }
-            execute_cs_command(subcommand);
+        }
+
+        // Construct true and false commands
+        if (else_index != -1) {
+            for (int i = 1; i < else_index; i++) {
+                strcat(true_command, args[i]);
+                if (i < else_index - 1) strcat(true_command, " ");
+            }
+            for (int i = else_index + 1; i < arg_count; i++) {
+                strcat(false_command, args[i]);
+                if (i < arg_count - 1) strcat(false_command, " ");
+            }
+        } else {
+            for (int i = 1; i < arg_count; i++) {
+                strcat(true_command, args[i]);
+                if (i < arg_count - 1) strcat(true_command, " ");
+            }
+        }
+
+        if (evaluate_condition(args[0])) {
+            execute_cs_command(true_command);
+        } else if (else_index != -1) {
+            execute_cs_command(false_command);
         }
     }
     else if (strcmp(cmd, "SLEEP") == 0 && arg_count == 1) {
         int sleep_time = atoi(args[0]);
         sleep(sleep_time);
     }
-
+    else if (strcmp(cmd, "FOR") == 0 && arg_count >= 5) {
+        execute_for_loop(args, arg_count);
+    }
+    else if (strcmp(cmd, "WHILE") == 0 && arg_count >= 2) {
+        execute_while_loop(args, arg_count);
+    }
 }
 
 void set_variable(const char *name, const char *value) {
@@ -172,15 +241,15 @@ void replace_variables(char *line) {
     char new_line[MAX_COMMAND_LEN];
 
     while ((var_start = strchr(line, '$')) != NULL) {
-        var_end = strchr(var_start, ' ');
-        if (var_end == NULL) var_end = var_start + strlen(var_start);
+        var_end = var_start + 1;
+        while (*var_end && (isalnum(*var_end) || *var_end == '_')) var_end++;
 
         strncpy(var_name, var_start + 1, var_end - var_start - 1);
         var_name[var_end - var_start - 1] = '\0';
 
         var_value = get_variable(var_name);
         if (var_value != NULL) {
-            strcpy(new_line, line);
+            strncpy(new_line, line, var_start - line);
             new_line[var_start - line] = '\0';
             strcat(new_line, var_value);
             strcat(new_line, var_end);
@@ -193,14 +262,24 @@ void replace_variables(char *line) {
 }
 
 int evaluate_condition(const char *condition) {
-    // Simple condition evaluation (you can expand this)
     char var_name[MAX_VAR_NAME];
+    char operator[3];
     char expected_value[MAX_VAR_VALUE];
-    sscanf(condition, "%s==%s", var_name, expected_value);
+
+    sscanf(condition, "%s%2s%s", var_name, operator, expected_value);
 
     char *actual_value = get_variable(var_name);
-    if (actual_value != NULL) {
-        return strcmp(actual_value, expected_value) == 0;
-    }
-    return 0;
+    if (actual_value == NULL) return 0;
+
+    int actual_int = atoi(actual_value);
+    int expected_int = atoi(expected_value);
+
+    if (strcmp(operator, "==") == 0) return strcmp(actual_value, expected_value) == 0;
+    if (strcmp(operator, "!=") == 0) return strcmp(actual_value, expected_value) != 0;
+    if (strcmp(operator, "<") == 0)  return actual_int < expected_int;
+    if (strcmp(operator, "<=") == 0) return actual_int <= expected_int;
+    if (strcmp(operator, ">") == 0)  return actual_int > expected_int;
+    if (strcmp(operator, ">=") == 0) return actual_int >= expected_int;
+
+    return 0;  // Invalid operator
 }
