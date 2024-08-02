@@ -1144,12 +1144,14 @@ void create_isolated_environment(FILE *bin_file, const char *bin_file_path, Cont
         "(allow file-read* (subpath \"/bin\"))"
         "(allow file-read* (subpath \"/System\"))"
         "(allow file-read* (subpath \"%s\"))"
+        "(allow file-read* (subpath \"/Applications/Xcode.app\"))"
         "(allow file-write* (subpath \"%s\"))"
         "(allow sysctl-read)"
         "(allow mach-lookup)"
         "(allow network-outbound (remote ip))"
         "(allow network-inbound (local ip))"
         "(allow process-exec (subpath \"/usr/bin\"))"
+        "(allow process-exec (subpath \"/Applications/Xcode.app\"))"
         "(allow process-exec (subpath \"/bin\"))"
         "(allow process-exec (subpath \"%s\"))",
         container_root, container_root, bin_file_path,
@@ -1760,7 +1762,7 @@ int main(int argc, char *argv[]) {
         create_isolated_environment(bin_file, argv[2], &network);
         fclose(bin_file);
     } else if (strcmp(argv[1], "--version") == 0) {
-        printf("Osxiec version 0.62\n");
+        printf("Osxiec version 0.63\n");
     } else if (strcmp(argv[1], "-pull") == 0) {
         if (argc != 3) {
             printf("Usage: %s -pull <file_name>\n", argv[0]);
