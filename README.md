@@ -149,9 +149,10 @@ Make sure to include any dependencies or executables you can optain these by sea
            "some_content"
          ]
         "start_config_file"
-        executable2
-        "some_dependency"
+        "some_executable"
+        "dependency"
     }    
+    
 ]
 ```
 <br>
@@ -309,10 +310,38 @@ EXECUTE_FILE {path_to_script}
 ```sh
 SET {variable} {value}
 ```
-
+**While Loop**
+```sh
+WHILE {condition} {commands} END
+```
+**For Loop**
+```sh
+FOR {variable} TO {2variable} STEP {value} {commands} END
+```
 **Example**
 ```
 # This is an example script for the OSXIEC scripting language
+SET counter 0
+SET limit 10
+
+# Loop from 0 to 10
+FOR counter=0 TO limit STEP 2
+    IF counter==5
+        LOG "Counter is 5"
+    END
+    SLEEP 1
+END
+
+IF $var==5 LOG Variable is 5 ELSE LOG Variable is not 5
+
+# Loop while counter is less than limit
+WHILE counter<limit
+    IF counter==5
+        LOG "Counter is 5"
+    END
+    SET counter $(($counter + 1))
+    SLEEP 1
+END
 
 # Log the start of the script
 LOG Starting script for $container_name
