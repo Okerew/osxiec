@@ -134,8 +134,18 @@ osxiec -scan {some_name.bin}
 sudo osxiec -deploym {config_file}
 ```
 
+**Oexec** executes a container in offline mode without any networking or usage of ports
+```sh
+sudo osxiec -oexec {bin_file_path}
+```
+
+**Extract** extracts files and folders from a container
+```sh
+sudo osxiec -extract {bin_file_path}
+```
+
 ## Creating a container
-Make sure to include any dependencies or executables you can optain these by searching for where a dependency or executable is located and copying it along with it's dependencies.
+Make sure to include any dependencies or executables you can obtain these by searching for where a dependency or executable is located and copying it along with it's dependencies.
 
 
 **Example structure**
@@ -158,7 +168,7 @@ Make sure to include any dependencies or executables you can optain these by sea
 <br>
 
 **Script Example:**
-For example if I you have a node project make sure to include somewhere the node executable in the directory you want to contain, then run the script with the node executable.
+For example if you have a node project make sure to include somewhere the node executable in the directory you want to contain, then run the script with the node executable.
 
 ``` js
 console.log("Hello World")
@@ -318,6 +328,13 @@ WHILE {condition} {commands} END
 ```sh
 FOR {variable} TO {2variable} STEP {value} {commands} END
 ```
+
+**ELSE**
+```sh
+IF {condition} ELSE {commands} END
+```
+Note ELSE statement for now doesn't work with LOG and is a work in progress
+
 **Example**
 ```
 # This is an example script for the OSXIEC scripting language
