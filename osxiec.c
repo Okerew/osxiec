@@ -15,6 +15,7 @@
 #include <regex.h>
 #include <stdbool.h>
 #include "osxiec_script/osxiec_script.h"
+#include <libgen.h>
 
 #define MAX_COMMAND_LEN 1024
 #define MAX_PATH_LEN 256
@@ -576,12 +577,32 @@ void containerize_directory(const char *dir_path, const char *output_file, const
     fwrite(&config, sizeof(ContainerConfig), 1, bin_file);
     fwrite(&num_files, sizeof(int), 1, bin_file);
 
+    // Display the progress bar
+    int progress_bar_width = 50;
+    printf("Containerizing [");
+    fflush(stdout);
+
     for (int i = 0; i < num_files; i++) {
         fwrite(files[i].name, sizeof(char), MAX_PATH_LEN, bin_file);
         fwrite(&files[i].size, sizeof(size_t), 1, bin_file);
         fwrite(files[i].data, 1, files[i].size, bin_file);
         free(files[i].data);
+
+        // Update the progress bar
+        int progress = (i + 1) * progress_bar_width / num_files;
+        for (int j = 0; j < progress; j++) {
+            printf("#");
+            fflush(stdout);
+        }
+        for (int j = progress; j < progress_bar_width; j++) {
+            printf(" ");
+            fflush(stdout);
+        }
+        printf("] %d%%\r", (i + 1) * 100 / num_files);
+        fflush(stdout);
     }
+
+    printf("\n");
 
     free(files);
     fclose(bin_file);
@@ -1258,6 +1279,211 @@ void create_isolated_environment(FILE *bin_file, const char *bin_file_path, Cont
     free(container_state.environment_variables);
 }
 
+
+void ocreate_isolated_environment(FILE *bin_file, const char *bin_file_path) {
+    // This is a version of create_isolated_environment that is offline and doesn't use any ports or networking.
+    ContainerConfig config;
+    fread(&config, sizeof(ContainerConfig), 1, bin_file);
+
+    int num_files;
+    fread(&num_files, sizeof(int), 1, bin_file);
+
+    // Create shared folder if it doesn't exist
+    char shared_folder_path[] = "/Volumes/SharedContainer";
+    mkdir(shared_folder_path, 0755);
+
+    // Create and mount disk image for file system isolation
+    char disk_image_path[MAX_PATH_LEN];
+    snprintf(disk_image_path, sizeof(disk_image_path), "/tmp/container_disk_%d.dmg", getpid());
+
+    char create_disk_command[MAX_COMMAND_LEN];
+    snprintf(create_disk_command, sizeof(create_disk_command), "hdiutil create -size 1g -fs HFS+ -volname Container %s", disk_image_path);
+    system(create_disk_command);
+
+    chmod(disk_image_path, 0644);  // rw-r--r--
+
+    char mount_command[MAX_COMMAND_LEN];
+    snprintf(mount_command, sizeof(mount_command), "hdiutil attach %s", disk_image_path);
+    system(mount_command);
+
+    char container_root[] = "/Volumes/Container";
+
+    // Create a symbolic link to the shared folder
+    char shared_mount_point[MAX_PATH_LEN];
+    snprintf(shared_mount_point, sizeof(shared_mount_point), "%s/shared", container_root);
+    symlink(shared_folder_path, shared_mount_point);
+
+    // Extract files
+    for (int i = 0; i < num_files; i++) {
+        File file;
+        fread(file.name, sizeof(char), MAX_PATH_LEN, bin_file);
+        fread(&file.size, sizeof(size_t), 1, bin_file);
+
+        file.data = malloc(file.size);
+        if (file.data == NULL) {
+            perror("Error allocating memory for file data");
+            exit(EXIT_FAILURE);
+        }
+
+        fread(file.data, 1, file.size, bin_file);
+
+        char file_path[MAX_PATH_LEN];
+        snprintf(file_path, sizeof(file_path), "%s/%s", container_root, file.name);
+
+        // Ensure all necessary directories exist
+        create_directories(file_path);
+
+        FILE *out_file = fopen(file_path, "wb");
+        if (out_file == NULL) {
+            perror("Error creating file in container");
+            exit(EXIT_FAILURE);
+        }
+
+        fwrite(file.data, 1, file.size, out_file);
+        fclose(out_file);
+        free(file.data);
+
+        chmod(file_path, 0755);
+    }
+
+    chmod(container_root, 0755);
+
+    if (chdir(container_root) != 0) {
+        perror("Failed to change to container root directory");
+        exit(1);
+    }
+
+    if (setgid(config.container_gid) != 0) {
+        perror("Failed to set group ID");
+        exit(1);
+    }
+
+    if (setuid(config.container_uid) != 0) {
+        perror("Failed to set user ID");
+        exit(1);
+    }
+
+    apply_resource_limits(&config);
+
+    // Updated sandbox profile
+    char sandbox_profile[1024];
+    snprintf(sandbox_profile, sizeof(sandbox_profile),
+        "(version 1)"
+        "(deny default)"
+        "(allow process-fork)"
+        "(allow file-read*)"
+        "(allow file-write* (subpath \"%s\"))"
+        "(allow file-read* (subpath \"%s\"))"
+        "(allow file-read* (literal \"%s\"))"
+        "(allow file-read* (subpath \"/usr/lib\"))"
+        "(allow file-read* (subpath \"/usr/bin\"))"
+        "(allow file-read* (subpath \"/bin\"))"
+        "(allow file-read* (subpath \"/System\"))"
+        "(allow file-read* (subpath \"%s\"))"
+        "(allow file-read* (subpath \"/Applications/Xcode.app\"))"
+        "(allow file-write* (subpath \"%s\"))"
+        "(allow sysctl-read)"
+        "(allow mach-lookup)"
+        "(allow network-outbound (remote ip))"
+        "(allow network-inbound (local ip))"
+        "(allow process-exec (subpath \"/usr/bin\"))"
+        "(allow process-exec (subpath \"/Applications/Xcode.app\"))"
+        "(allow process-exec (subpath \"/bin\"))"
+        "(allow process-exec (subpath \"%s\"))",
+        container_root, container_root, bin_file_path,
+        shared_mount_point, shared_mount_point, container_root
+    );
+
+    char *error;
+    if (sandbox_init(sandbox_profile, 0, &error) != 0) {
+        fprintf(stderr, "sandbox_init failed: %s\n", error);
+        sandbox_free_error(error);
+        exit(1);
+    }
+
+    printf("\n=== Container Terminal ===\n");
+    printf("Enter commands (type 'exit' to quit, help for help):\n");
+
+    if (config.start_config[0] != '\0') {
+        char start_config_path[MAX_PATH_LEN];
+        snprintf(start_config_path, sizeof(start_config_path), "%s/%s", container_root, config.start_config);
+        execute_start_config(start_config_path);
+    }
+
+    char command[MAX_COMMAND_LEN];
+    while (1) {
+        printf("> ");
+        fflush(stdout);
+
+        if (fgets(command, sizeof(command), stdin) == NULL) break;
+        command[strcspn(command, "\n")] = '\0';
+
+        if (strcmp(command, "exit") == 0) break;
+        if (strcmp(command, "debug") == 0) {
+            debug_mode = DEBUG_STEP;
+            printf("Entered debug mode. Type 'help' for debug commands.\n");
+            continue;
+        }
+        if (strncmp(command, "scale", 5) == 0) {
+            long memory_soft_limit, memory_hard_limit;
+            int cpu_priority;
+            if (sscanf(command, "scale %ld %ld %d", &memory_soft_limit, &memory_hard_limit, &cpu_priority) == 3) {
+                scale_container_resources(memory_soft_limit, memory_hard_limit, cpu_priority);
+            } else {
+                printf("Usage: scale <memory_soft_limit> <memory_hard_limit> <cpu_priority>\n");
+            }
+            continue;
+        }
+        if (strncmp(command, "xs", 6) == 0) {
+            char *script_content = command + 7;
+            handle_script_command(script_content);
+            continue;
+        }
+        if (strncmp(command, "osxs", 4) == 0) {
+            char *filename = command + 5;
+            while (isspace(*filename)) {
+                filename++;
+            }
+            handle_script_file(filename);
+            continue;
+        }
+
+        if (strcmp(command, "autoscale") == 0) {
+            start_auto_scaling(&config);
+            continue;
+        }
+
+        if (strcmp(command, "status") == 0) {
+            print_current_resource_usage(&config);
+            continue;
+        }
+
+        if (strcmp(command, "help") == 0) {
+            printf("Commands:\n");
+            printf("  exit: Exit the container\n");
+            printf("  debug: Enter debug mode\n");
+            printf("  scale <memory_soft_limit> <memory_hard_limit> <cpu_priority>: Set memory limits and CPU priority\n");
+            printf("  xs <script_content>: Execute a script in the container\n");
+            printf("  osxs <filename>: Execute a script file in the container\n");
+            printf("  autoscale: Start automatic resource scaling\n");
+            printf("  status: Print current resource usage\n");
+            printf("  help: Print this help message\n");
+            continue;
+        }
+
+        execute_command(command);
+        printf("\n");
+    }
+
+    printf("Container terminated.\n");
+
+    // Cleanup container state
+    for (int i = 0; i < container_state.num_env_vars; i++) {
+        free(container_state.environment_variables[i]);
+    }
+    free(container_state.environment_variables);
+}
+
 size_t write_data(void *ptr, size_t size, size_t nmemb, FILE *stream) {
     size_t written = fwrite(ptr, size, nmemb, stream);
     return written;
@@ -1458,6 +1684,20 @@ void convert_to_docker(const char *osxiec_file, const char *output_dir, const ch
             return;
         }
 
+        // Skip the "shared" folder
+        if (strncmp(file_name, "shared/", 7) == 0) {
+            continue;
+        }
+
+        // Create the directory structure
+        char *dir_name = dirname(file_name);
+        char dir_path[MAX_PATH_LEN];
+        snprintf(dir_path, sizeof(dir_path), "%s/%s", output_dir, dir_name);
+        if (mkdir(dir_path, 0755) != 0 && errno != EEXIST) {
+            perror("Error creating directory");
+            continue;
+        }
+
         char file_path[MAX_PATH_LEN];
         snprintf(file_path, sizeof(file_path), "%s/%s", output_dir, file_name);
         FILE *out_file = fopen(file_path, "wb");
@@ -1485,7 +1725,9 @@ void convert_to_docker(const char *osxiec_file, const char *output_dir, const ch
         fclose(out_file);
 
         if (custom_dockerfile == NULL) {
-            fprintf(dockerfile, "COPY %s /app/%s\n", file_name, file_name);
+            char relative_path[MAX_PATH_LEN];
+            snprintf(relative_path, sizeof(relative_path), "%s", file_name);
+            fprintf(dockerfile, "COPY %s /app/%s\n", relative_path, relative_path);
         }
     }
 
@@ -1616,6 +1858,94 @@ void detach_container_images() {
     }
 }
 
+void extract_container(const char *osxiec_file, const char *output_dir) {
+    FILE *bin_file = fopen(osxiec_file, "rb");
+    if (bin_file == NULL) {
+        perror("Error opening osxiec container file");
+        return;
+    }
+
+    // Read container config
+    ContainerConfig config;
+    if (fread(&config, sizeof(ContainerConfig), 1, bin_file) != 1) {
+        perror("Error reading container config");
+        fclose(bin_file);
+        return;
+    }
+
+    // Create output directory
+    if (mkdir(output_dir, 0755) != 0 && errno != EEXIST) {
+        perror("Error creating output directory");
+        fclose(bin_file);
+        return;
+    }
+
+    // Read number of files
+    int num_files;
+    if (fread(&num_files, sizeof(int), 1, bin_file) != 1) {
+        perror("Error reading number of files");
+        fclose(bin_file);
+        return;
+    }
+
+    char buffer[CHUNK_SIZE];
+    for (int i = 0; i < num_files; i++) {
+        char file_name[MAX_PATH_LEN];
+        size_t file_size;
+
+        if (fread(file_name, sizeof(char), MAX_PATH_LEN, bin_file) != MAX_PATH_LEN ||
+            fread(&file_size, sizeof(size_t), 1, bin_file) != 1) {
+            perror("Error reading file metadata");
+            fclose(bin_file);
+            return;
+        }
+
+        // Skip the "shared" folder
+        if (strncmp(file_name, "shared/", 7) == 0) {
+            continue;
+        }
+
+        // Create the directory structure
+        char *dir_name = dirname(file_name);
+        char dir_path[MAX_PATH_LEN];
+        snprintf(dir_path, sizeof(dir_path), "%s/%s", output_dir, dir_name);
+        if (mkdir(dir_path, 0755) != 0 && errno != EEXIST) {
+            perror("Error creating directory");
+            continue;
+        }
+
+        char file_path[MAX_PATH_LEN];
+        snprintf(file_path, sizeof(file_path), "%s/%s", output_dir, file_name);
+        FILE *out_file = fopen(file_path, "wb");
+        if (out_file == NULL) {
+            perror("Error creating file in output directory");
+            continue;
+        }
+
+        size_t remaining = file_size;
+        while (remaining > 0) {
+            size_t to_read = (remaining < CHUNK_SIZE) ? remaining : CHUNK_SIZE;
+            size_t bytes_read = fread(buffer, 1, to_read, bin_file);
+            if (bytes_read == 0) {
+                if (feof(bin_file)) {
+                    fprintf(stderr, "Unexpected end of file\n");
+                } else {
+                    perror("Error reading file data");
+                }
+                break;
+            }
+            fwrite(buffer, 1, bytes_read, out_file);
+            remaining -= bytes_read;
+        }
+
+        fclose(out_file);
+    }
+
+    fclose(bin_file);
+
+    printf("Container extracted to %s\n", output_dir);
+}
+
 int main(int argc, char *argv[]) {
     PluginManager plugin_manager;
     plugin_manager_init(&plugin_manager);
@@ -1709,7 +2039,20 @@ int main(int argc, char *argv[]) {
         ContainerNetwork dummy_network = {0};
         create_isolated_environment(bin_file, argv[2], &dummy_network);
         fclose(bin_file);
+    } else if (strcmp(argv[1], "-oexec") == 0) {
+        if (argc < 3) {
+            fprintf(stderr, "Usage for execute: %s -execute <bin_file> [-port <port>]\n", argv[0]);
+            return EXIT_FAILURE;
+        }
 
+        FILE *bin_file = fopen(argv[2], "rb");
+        if (bin_file == NULL) {
+            perror("Error opening binary file");
+            return EXIT_FAILURE;
+        }
+
+        ocreate_isolated_environment(bin_file, argv[2]);
+        fclose(bin_file);
     } else if (strcmp(argv[1], "-network") == 0) {
         if (argc < 4) {
             fprintf(stderr, "Usage: %s -network <create|remove> <name> [vlan_id]\n", argv[0]);
@@ -1762,7 +2105,7 @@ int main(int argc, char *argv[]) {
         create_isolated_environment(bin_file, argv[2], &network);
         fclose(bin_file);
     } else if (strcmp(argv[1], "--version") == 0) {
-        printf("Osxiec version 0.63\n");
+        printf("Osxiec version 0.64\n");
     } else if (strcmp(argv[1], "-pull") == 0) {
         if (argc != 3) {
             printf("Usage: %s -pull <file_name>\n", argv[0]);
@@ -1823,13 +2166,25 @@ int main(int argc, char *argv[]) {
 
         system(command);
     } else if (strcmp(argv[1], "-detach") == 0) {
+        if (argc > 2) {
+            fprintf(stderr, "Usage: %s -detach\n", argv[0]);
+            return EXIT_FAILURE;
+        }
         detach_container_images();
+    } else if (strcmp(argv[1], "-extract") == 0) {
+        if (argc != 4) {
+            fprintf(stderr, "Usage: %s -extract <container_file> <output_directory>\n", argv[0]);
+            return EXIT_FAILURE;
+        }
+        extract_container(argv[2], argv[3]);
     } else if (strcmp(argv[1], "-help") == 0) {
         printf("Available commands:\n");
         printf("  -contain <directory_path> <output_file>\n");
         printf("Contains a directory into a container file\n");
         printf("  -execute <directory_path> [-port <port>]\n");
         printf("Executes a container file\n");
+        printf(" -oexec <container_file>\n");
+        printf("Executes a container file in offline mode\n");
         printf("  -network <create|remove> <name> [vlan_id>\n");
         printf("Manages the vlan network\n");
         printf("  -run <container_file> <network_name> [-port <port>]\n");
@@ -1852,6 +2207,8 @@ int main(int argc, char *argv[]) {
         printf("Deploys multiple containers from a config file\n");
         printf("  -detach\n");
         printf("Detaches container from /Volumes\n");
+        printf("  -extract <container_file> <output_directory>\n");
+        printf("Extracts a container file\n");
         printf("  --version\n");
         printf("Prints the version of osxiec\n");
         printf("  -help\n");
