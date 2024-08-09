@@ -32,6 +32,8 @@ brew install ninja
 ``` sh
 brew install cmake
 ```
+**Xcode**
+https://apps.apple.com/us/app/xcode/id497799835?mt=12
 ## Installation
 
 1. **Download the Release**:
@@ -530,6 +532,3 @@ After this on the execution of osxiec command the plugin will be loaded.
   having it disabled causes many permission issues.
 - **Sandbox deprecation error** yes I know that sandbox innit is deprecated but there isn't really an alternative for it unless I would use xcode and there is no way I am using it to rebuild this.
 ---
-
-## License
-For detailed information on your rights and obligations, please refer to the two license files provided. Each file outlines what you are permitted to do under the respective license terms.
