@@ -1684,11 +1684,6 @@ void convert_to_docker(const char *osxiec_file, const char *output_dir, const ch
             return;
         }
 
-        // Skip the "shared" folder
-        if (strncmp(file_name, "shared/", 7) == 0) {
-            continue;
-        }
-
         // Create the directory structure
         char *dir_name = dirname(file_name);
         char dir_path[MAX_PATH_LEN];
@@ -1900,11 +1895,6 @@ void extract_container(const char *osxiec_file, const char *output_dir) {
             return;
         }
 
-        // Skip the "shared" folder
-        if (strncmp(file_name, "shared/", 7) == 0) {
-            continue;
-        }
-
         // Create the directory structure
         char *dir_name = dirname(file_name);
         char dir_path[MAX_PATH_LEN];
@@ -2105,7 +2095,7 @@ int main(int argc, char *argv[]) {
         create_isolated_environment(bin_file, argv[2], &network);
         fclose(bin_file);
     } else if (strcmp(argv[1], "--version") == 0) {
-        printf("Osxiec version 0.64\n");
+        printf("Osxiec version 0.65\n");
     } else if (strcmp(argv[1], "-pull") == 0) {
         if (argc != 3) {
             printf("Usage: %s -pull <file_name>\n", argv[0]);
@@ -2179,7 +2169,7 @@ int main(int argc, char *argv[]) {
         extract_container(argv[2], argv[3]);
     } else if (strcmp(argv[1], "-help") == 0) {
         printf("Available commands:\n");
-        printf("  -contain <directory_path> <output_file>\n");
+        printf("  -contain <directory_path> <output_file> <path_to_start_config_file>\n");
         printf("Contains a directory into a container file\n");
         printf("  -execute <directory_path> [-port <port>]\n");
         printf("Executes a container file\n");
