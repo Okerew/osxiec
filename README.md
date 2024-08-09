@@ -530,3 +530,6 @@ After this on the execution of osxiec command the plugin will be loaded.
   having it disabled causes many permission issues.
 - **Sandbox deprecation error** yes I know that sandbox innit is deprecated but there isn't really an alternative for it unless I would use xcode and there is no way I am using it to rebuild this.
 ---
+
+## License
+For detailed information on your rights and obligations, please refer to the two license files provided. Each file outlines what you are permitted to do under the respective license terms.
