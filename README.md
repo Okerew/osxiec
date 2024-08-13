@@ -23,6 +23,11 @@ brew install curl
 ```sh
 brew install readline
 ```
+
+**Json-c**
+```sh
+brew install json-c@0.17
+```
 ### Build Dependencies
 **Ninja for building**
 ```sh
@@ -144,6 +149,11 @@ sudo osxiec -oexec {bin_file_path}
 **Extract** extracts files and folders from a container
 ```sh
 sudo osxiec -extract {bin_file_path}
+```
+
+**Convert to oci** converts to an oci container
+```sh
+osxiec -convert-to-oci {bin_file_path} {output_path} {arch} {author} 
 ```
 
 ## Creating a container
