@@ -16,6 +16,8 @@
 #include <stdbool.h>
 #include "osxiec_script/osxiec_script.h"
 #include <libgen.h>
+#include "/opt/homebrew/Cellar/json-c/0.17/include/json-c/json.h"
+#include <termios.h>
 
 #define MAX_COMMAND_LEN 1024
 #define MAX_PATH_LEN 256
@@ -33,6 +35,7 @@
 #define MAX_CPU_PRIORITY 39 // Maximum nice value
 #define MIN_CPU_PRIORITY -20 // Minimum nice value
 #define MAX_MEMORY_LIMIT 2147483648 // 2 GB max memory limit
+#define MAX_HISTORY_LEN 100
 
 int port = PORT;
 
@@ -82,6 +85,13 @@ typedef struct {
 
 ContainerState container_state = {0};
 
+typedef struct {
+    char commands[MAX_HISTORY_LEN][MAX_COMMAND_LEN];
+    int count;
+    int current;
+} CommandHistory;
+
+CommandHistory history = { .count = 0, .current = 0 };
 
 int read_files(const char *dir_path, File *files, uid_t uid, gid_t gid) {
     DIR *dir;
@@ -1063,6 +1073,61 @@ void print_current_resource_usage(ContainerConfig *config) {
     }
 }
 
+void set_terminal_raw_mode() {
+    struct termios raw;
+    tcgetattr(STDIN_FILENO, &raw);
+    raw.c_lflag &= ~(ICANON | ECHO);
+    tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
+}
+
+void set_terminal_canonical_mode() {
+    struct termios canonical;
+    tcgetattr(STDIN_FILENO, &canonical);
+    canonical.c_lflag |= (ICANON | ECHO);
+    tcsetattr(STDIN_FILENO, TCSAFLUSH, &canonical);
+}
+
+void move_cursor_left(int n) {
+    printf("\033[%dD", n);
+    fflush(stdout);
+}
+
+void move_cursor_right(int n) {
+    printf("\033[%dC", n);
+    fflush(stdout);
+}
+
+void clear_line() {
+    printf("\033[2K");
+    fflush(stdout);
+}
+
+void add_to_history(const char *command) {
+    if (history.count < MAX_HISTORY_LEN) {
+        strncpy(history.commands[history.count], command, MAX_COMMAND_LEN);
+        history.count++;
+        history.current = history.count;
+    } else {
+        // Shift the history to make room for the new command
+        memmove(history.commands, history.commands + 1, (MAX_HISTORY_LEN - 1) * MAX_COMMAND_LEN);
+        strncpy(history.commands[MAX_HISTORY_LEN - 1], command, MAX_COMMAND_LEN);
+    }
+}
+
+void navigate_history(char *command, int *command_index, int *cursor_pos, int direction) {
+    if (direction == -1 && history.current > 0) {
+        history.current--;
+        strncpy(command, history.commands[history.current], MAX_COMMAND_LEN);
+        *command_index = strlen(command);
+        *cursor_pos = *command_index;
+    } else if (direction == 1 && history.current < history.count - 1) {
+        history.current++;
+        strncpy(command, history.commands[history.current], MAX_COMMAND_LEN);
+        *command_index = strlen(command);
+        *cursor_pos = *command_index;
+    }
+}
+
 void create_isolated_environment(FILE *bin_file, const char *bin_file_path, ContainerNetwork *network) {
     ContainerConfig config;
     fread(&config, sizeof(ContainerConfig), 1, bin_file);
@@ -1202,70 +1267,111 @@ void create_isolated_environment(FILE *bin_file, const char *bin_file_path, Cont
     }
 
     char command[MAX_COMMAND_LEN];
+    int command_index = 0;
+    int cursor_pos = 0;
+
+    set_terminal_raw_mode();
+
     while (1) {
         printf("> ");
         fflush(stdout);
 
-        if (fgets(command, sizeof(command), stdin) == NULL) break;
-        command[strcspn(command, "\n")] = '\0';
+        int ch;
+        while ((ch = getchar()) != EOF) {
+            if (ch == 27) { // ESC key
+                getchar(); // Skip the next character
+                ch = getchar(); // Get the actual key code
+                if (ch == 'A') { // Up arrow
+                    navigate_history(command, &command_index, &cursor_pos, -1);
+                } else if (ch == 'B') { // Down arrow
+                    navigate_history(command, &command_index, &cursor_pos, 1);
+                } else if (ch == 'C') { // Right arrow
+                    if (cursor_pos < command_index) {
+                        move_cursor_right(1);
+                        cursor_pos++;
+                    }
+                } else if (ch == 'D') { // Left arrow
+                    if (cursor_pos > 0) {
+                        move_cursor_left(1);
+                        cursor_pos--;
+                    }
+                }
+            } else if (ch == 127 || ch == 8) { // Backspace or Delete
+                if (cursor_pos > 0) {
+                    move_cursor_left(1);
+                    clear_line();
+                    memmove(&command[cursor_pos - 1], &command[cursor_pos], command_index - cursor_pos + 1);
+                    command_index--;
+                    cursor_pos--;
+                    printf("%s", &command[cursor_pos]);
+                    move_cursor_left(command_index - cursor_pos);
+                }
+            } else if (ch == '\n' || ch == '\r') { // Enter key
+                command[command_index] = '\0';
+                set_terminal_canonical_mode();
+                usleep(10000); // 10ms delay
 
-        if (strcmp(command, "exit") == 0) break;
-        if (strcmp(command, "debug") == 0) {
-            debug_mode = DEBUG_STEP;
-            printf("Entered debug mode. Type 'help' for debug commands.\n");
-            continue;
-        }
-        if (strncmp(command, "scale", 5) == 0) {
-            long memory_soft_limit, memory_hard_limit;
-            int cpu_priority;
-            if (sscanf(command, "scale %ld %ld %d", &memory_soft_limit, &memory_hard_limit, &cpu_priority) == 3) {
-                scale_container_resources(memory_soft_limit, memory_hard_limit, cpu_priority);
+                if (strcmp(command, "exit") == 0) goto exit_loop;
+                if (strcmp(command, "debug") == 0) {
+                    debug_mode = DEBUG_STEP;
+                    printf("Entered debug mode. Type 'help' for debug commands.\n");
+                } else if (strncmp(command, "scale", 5) == 0) {
+                    long memory_soft_limit, memory_hard_limit;
+                    int cpu_priority;
+                    if (sscanf(command, "scale %ld %ld %d", &memory_soft_limit, &memory_hard_limit, &cpu_priority) == 3) {
+                        scale_container_resources(memory_soft_limit, memory_hard_limit, cpu_priority);
+                    } else {
+                        printf("Usage: scale <memory_soft_limit> <memory_hard_limit> <cpu_priority>\n");
+                    }
+                } else if (strncmp(command, "xs", 6) == 0) {
+                    char *script_content = command + 7;
+                    handle_script_command(script_content);
+                } else if (strncmp(command, "osxs", 4) == 0) {
+                    char *filename = command + 5;
+                    while (isspace(*filename)) {
+                        filename++;
+                    }
+                    handle_script_file(filename);
+                } else if (strcmp(command, "autoscale") == 0) {
+                    start_auto_scaling(&config);
+                } else if (strcmp(command, "status") == 0) {
+                    print_current_resource_usage(&config);
+                } else if (strcmp(command, "help") == 0) {
+                    printf("Commands:\n");
+                    printf("  exit: Exit the container\n");
+                    printf("  debug: Enter debug mode\n");
+                    printf("  scale <memory_soft_limit> <memory_hard_limit> <cpu_priority>: Set memory limits and CPU priority\n");
+                    printf("  xs <script_content>: Execute a script in the container\n");
+                    printf("  osxs <filename>: Execute a script file in the container\n");
+                    printf("  autoscale: Start automatic resource scaling\n");
+                    printf("  status: Print current resource usage\n");
+                    printf("  help: Print this help message\n");
+                } else {
+                    execute_command(command);
+                }
+
+                printf("\n");
+                add_to_history(command);
+                command_index = 0;
+                cursor_pos = 0;
+                set_terminal_raw_mode();
+                printf("> ");
+                fflush(stdout);
             } else {
-                printf("Usage: scale <memory_soft_limit> <memory_hard_limit> <cpu_priority>\n");
+                if (command_index < MAX_COMMAND_LEN - 1) {
+                    memmove(&command[cursor_pos + 1], &command[cursor_pos], command_index - cursor_pos + 1);
+                    command[cursor_pos] = ch;
+                    command_index++;
+                    cursor_pos++;
+                    printf("%s", &command[cursor_pos - 1]);
+                    move_cursor_left(command_index - cursor_pos);
+                }
             }
-            continue;
         }
-        if (strncmp(command, "xs", 6) == 0) {
-            char *script_content = command + 7;
-            handle_script_command(script_content);
-            continue;
-        }
-        if (strncmp(command, "osxs", 4) == 0) {
-            char *filename = command + 5;
-            while (isspace(*filename)) {
-                filename++;
-            }
-            handle_script_file(filename);
-            continue;
-        }
-
-        if (strcmp(command, "autoscale") == 0) {
-            start_auto_scaling(&config);
-            continue;
-        }
-
-        if (strcmp(command, "status") == 0) {
-            print_current_resource_usage(&config);
-            continue;
-        }
-
-        if (strcmp(command, "help") == 0) {
-            printf("Commands:\n");
-            printf("  exit: Exit the container\n");
-            printf("  debug: Enter debug mode\n");
-            printf("  scale <memory_soft_limit> <memory_hard_limit> <cpu_priority>: Set memory limits and CPU priority\n");
-            printf("  xs <script_content>: Execute a script in the container\n");
-            printf("  osxs <filename>: Execute a script file in the container\n");
-            printf("  autoscale: Start automatic resource scaling\n");
-            printf("  status: Print current resource usage\n");
-            printf("  help: Print this help message\n");
-            continue;
-        }
-
-        execute_command(command);
-        printf("\n");
     }
 
+exit_loop:
+    set_terminal_canonical_mode();
     printf("Container terminated.\n");
 
     // Clean up the network thread
@@ -1278,7 +1384,6 @@ void create_isolated_environment(FILE *bin_file, const char *bin_file_path, Cont
     }
     free(container_state.environment_variables);
 }
-
 
 void ocreate_isolated_environment(FILE *bin_file, const char *bin_file_path) {
     // This is a version of create_isolated_environment that is offline and doesn't use any ports or networking.
@@ -1411,70 +1516,111 @@ void ocreate_isolated_environment(FILE *bin_file, const char *bin_file_path) {
     }
 
     char command[MAX_COMMAND_LEN];
+    int command_index = 0;
+    int cursor_pos = 0;
+
+    set_terminal_raw_mode();
+
     while (1) {
         printf("> ");
         fflush(stdout);
 
-        if (fgets(command, sizeof(command), stdin) == NULL) break;
-        command[strcspn(command, "\n")] = '\0';
+        int ch;
+        while ((ch = getchar()) != EOF) {
+            if (ch == 27) { // ESC key
+                getchar(); // Skip the next character
+                ch = getchar(); // Get the actual key code
+                if (ch == 'A') { // Up arrow
+                    navigate_history(command, &command_index, &cursor_pos, -1);
+                } else if (ch == 'B') { // Down arrow
+                    navigate_history(command, &command_index, &cursor_pos, 1);
+                } else if (ch == 'C') { // Right arrow
+                    if (cursor_pos < command_index) {
+                        move_cursor_right(1);
+                        cursor_pos++;
+                    }
+                } else if (ch == 'D') { // Left arrow
+                    if (cursor_pos > 0) {
+                        move_cursor_left(1);
+                        cursor_pos--;
+                    }
+                }
+            } else if (ch == 127 || ch == 8) { // Backspace or Delete
+                if (cursor_pos > 0) {
+                    move_cursor_left(1);
+                    clear_line();
+                    memmove(&command[cursor_pos - 1], &command[cursor_pos], command_index - cursor_pos + 1);
+                    command_index--;
+                    cursor_pos--;
+                    printf("%s", &command[cursor_pos]);
+                    move_cursor_left(command_index - cursor_pos);
+                }
+            } else if (ch == '\n' || ch == '\r') { // Enter key
+                command[command_index] = '\0';
+                set_terminal_canonical_mode();
+                usleep(10000); // 10ms delay
 
-        if (strcmp(command, "exit") == 0) break;
-        if (strcmp(command, "debug") == 0) {
-            debug_mode = DEBUG_STEP;
-            printf("Entered debug mode. Type 'help' for debug commands.\n");
-            continue;
-        }
-        if (strncmp(command, "scale", 5) == 0) {
-            long memory_soft_limit, memory_hard_limit;
-            int cpu_priority;
-            if (sscanf(command, "scale %ld %ld %d", &memory_soft_limit, &memory_hard_limit, &cpu_priority) == 3) {
-                scale_container_resources(memory_soft_limit, memory_hard_limit, cpu_priority);
+                if (strcmp(command, "exit") == 0) goto exit_loop;
+                if (strcmp(command, "debug") == 0) {
+                    debug_mode = DEBUG_STEP;
+                    printf("Entered debug mode. Type 'help' for debug commands.\n");
+                } else if (strncmp(command, "scale", 5) == 0) {
+                    long memory_soft_limit, memory_hard_limit;
+                    int cpu_priority;
+                    if (sscanf(command, "scale %ld %ld %d", &memory_soft_limit, &memory_hard_limit, &cpu_priority) == 3) {
+                        scale_container_resources(memory_soft_limit, memory_hard_limit, cpu_priority);
+                    } else {
+                        printf("Usage: scale <memory_soft_limit> <memory_hard_limit> <cpu_priority>\n");
+                    }
+                } else if (strncmp(command, "xs", 6) == 0) {
+                    char *script_content = command + 7;
+                    handle_script_command(script_content);
+                } else if (strncmp(command, "osxs", 4) == 0) {
+                    char *filename = command + 5;
+                    while (isspace(*filename)) {
+                        filename++;
+                    }
+                    handle_script_file(filename);
+                } else if (strcmp(command, "autoscale") == 0) {
+                    start_auto_scaling(&config);
+                } else if (strcmp(command, "status") == 0) {
+                    print_current_resource_usage(&config);
+                } else if (strcmp(command, "help") == 0) {
+                    printf("Commands:\n");
+                    printf("  exit: Exit the container\n");
+                    printf("  debug: Enter debug mode\n");
+                    printf("  scale <memory_soft_limit> <memory_hard_limit> <cpu_priority>: Set memory limits and CPU priority\n");
+                    printf("  xs <script_content>: Execute a script in the container\n");
+                    printf("  osxs <filename>: Execute a script file in the container\n");
+                    printf("  autoscale: Start automatic resource scaling\n");
+                    printf("  status: Print current resource usage\n");
+                    printf("  help: Print this help message\n");
+                } else {
+                    execute_command(command);
+                }
+
+                printf("\n");
+                add_to_history(command);
+                command_index = 0;
+                cursor_pos = 0;
+                set_terminal_raw_mode();
+                printf("> ");
+                fflush(stdout);
             } else {
-                printf("Usage: scale <memory_soft_limit> <memory_hard_limit> <cpu_priority>\n");
+                if (command_index < MAX_COMMAND_LEN - 1) {
+                    memmove(&command[cursor_pos + 1], &command[cursor_pos], command_index - cursor_pos + 1);
+                    command[cursor_pos] = ch;
+                    command_index++;
+                    cursor_pos++;
+                    printf("%s", &command[cursor_pos - 1]);
+                    move_cursor_left(command_index - cursor_pos);
+                }
             }
-            continue;
         }
-        if (strncmp(command, "xs", 6) == 0) {
-            char *script_content = command + 7;
-            handle_script_command(script_content);
-            continue;
-        }
-        if (strncmp(command, "osxs", 4) == 0) {
-            char *filename = command + 5;
-            while (isspace(*filename)) {
-                filename++;
-            }
-            handle_script_file(filename);
-            continue;
-        }
-
-        if (strcmp(command, "autoscale") == 0) {
-            start_auto_scaling(&config);
-            continue;
-        }
-
-        if (strcmp(command, "status") == 0) {
-            print_current_resource_usage(&config);
-            continue;
-        }
-
-        if (strcmp(command, "help") == 0) {
-            printf("Commands:\n");
-            printf("  exit: Exit the container\n");
-            printf("  debug: Enter debug mode\n");
-            printf("  scale <memory_soft_limit> <memory_hard_limit> <cpu_priority>: Set memory limits and CPU priority\n");
-            printf("  xs <script_content>: Execute a script in the container\n");
-            printf("  osxs <filename>: Execute a script file in the container\n");
-            printf("  autoscale: Start automatic resource scaling\n");
-            printf("  status: Print current resource usage\n");
-            printf("  help: Print this help message\n");
-            continue;
-        }
-
-        execute_command(command);
-        printf("\n");
     }
 
+exit_loop:
+    set_terminal_canonical_mode();
     printf("Container terminated.\n");
 
     // Cleanup container state
@@ -1936,6 +2082,203 @@ void extract_container(const char *osxiec_file, const char *output_dir) {
     printf("Container extracted to %s\n", output_dir);
 }
 
+typedef enum { ENTRY_FILE, ENTRY_DIR } EntryType;
+
+void create_directory_if_needed(const char *path) {
+    char dir[MAX_PATH_LEN];
+    snprintf(dir, sizeof(dir), "%s", path);
+
+    for (char *p = dir + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            if (access(dir, F_OK) != 0) { // Check if the directory exists
+                if (mkdir(dir, 0777) != 0 && errno != EEXIST) {
+                    perror("Error creating directory");
+                    exit(EXIT_FAILURE);
+                }
+            }
+            *p = '/';
+        }
+    }
+    if (access(dir, F_OK) != 0) { // Check if the directory exists
+        if (mkdir(dir, 0777) != 0 && errno != EEXIST) {
+            perror("Error creating directory");
+            exit(EXIT_FAILURE);
+        }
+    }
+}
+
+void convert_to_oci(const char *osxiec_file, const char *output_dir, const char *arch, const char *author, const char *created) {
+    if (output_dir == NULL) {
+        perror("Output directory is NULL");
+        return;
+    }
+
+    FILE *bin_file = fopen(osxiec_file, "rb");
+    if (bin_file == NULL) {
+        perror("Error opening osxiec container file");
+        return;
+    }
+
+    // Read ContainerConfig
+    ContainerConfig config;
+    if (fread(&config, sizeof(ContainerConfig), 1, bin_file) != 1) {
+        perror("Error reading ContainerConfig");
+        fclose(bin_file);
+        return;
+    }
+
+    // Read number of entries
+    int num_entries;
+    if (fread(&num_entries, sizeof(int), 1, bin_file) != 1) {
+        perror("Error reading number of entries");
+        fclose(bin_file);
+        return;
+    }
+
+    printf("Number of entries: %d\n", num_entries);
+
+    // Create OCI layout file
+    char layout_path[MAX_PATH_LEN];
+    snprintf(layout_path, sizeof(layout_path), "%s/oci-layout", output_dir);
+    FILE *layout_file = fopen(layout_path, "w");
+    if (layout_file == NULL) {
+        perror("Error creating OCI layout file");
+        fclose(bin_file);
+        return;
+    }
+    fprintf(layout_file, "{\"imageLayoutVersion\": \"1.0.0\"}");
+    fclose(layout_file);
+
+    // Create blobs directory
+    char blobs_dir[MAX_PATH_LEN];
+    snprintf(blobs_dir, sizeof(blobs_dir), "%s/blobs/sha256", output_dir);
+    create_directory_if_needed(blobs_dir);
+
+    // Prepare config JSON
+    json_object *config_json = json_object_new_object();
+    json_object_object_add(config_json, "os", json_object_new_string("macOS"));
+    json_object_object_add(config_json, "architecture", json_object_new_string(arch));
+    json_object_object_add(config_json, "author", json_object_new_string(author));
+    json_object_object_add(config_json, "created", json_object_new_string(created));
+    json_object_object_add(config_json, "ociVersion", json_object_new_string("1.0.0"));
+    json_object_object_add(config_json, "root", json_object_new_object());
+    struct json_object *root_object = json_object_new_object();
+    struct json_object *path_object = json_object_new_string("");
+    json_object_object_add(root_object, "path", path_object);
+    json_object_object_add(config_json, "root", root_object);
+
+
+    // Create config blob
+    char config_blob_path[MAX_PATH_LEN];
+    snprintf(config_blob_path, sizeof(config_blob_path), "%s/config.json", blobs_dir);
+    FILE *config_blob = fopen(config_blob_path, "w");
+    if (config_blob == NULL) {
+        perror("Error creating config blob");
+        fclose(bin_file);
+        json_object_put(config_json);
+        return;
+    }
+    fprintf(config_blob, "%s", json_object_to_json_string_ext(config_json, JSON_C_TO_STRING_PRETTY));
+    fclose(config_blob);
+
+    // Prepare manifest JSON
+    json_object *manifest_json = json_object_new_object();
+    json_object_object_add(manifest_json, "schemaVersion", json_object_new_int(2));
+    json_object_object_add(manifest_json, "mediaType", json_object_new_string("application/vnd.oci.image.manifest.v1+json"));
+    json_object_object_add(manifest_json, "config", json_object_new_object());
+    json_object_object_add(json_object_object_get(manifest_json, "config"), "mediaType", json_object_new_string("application/vnd.oci.image.config.v1+json"));
+    json_object_object_add(json_object_object_get(manifest_json, "config"), "size", json_object_new_int64(strlen(json_object_to_json_string(config_json))));
+    json_object_object_add(json_object_object_get(manifest_json, "config"), "digest", json_object_new_string("sha256:configdigest")); // Replace with actual digest
+
+    json_object *layers_array = json_object_new_array();
+    json_object_object_add(manifest_json, "layers", layers_array);
+
+    char buffer[CHUNK_SIZE];
+    for (int i = 0; i < num_entries; i++) {
+        char path[MAX_PATH_LEN];
+        if (fread(path, sizeof(char), MAX_PATH_LEN, bin_file) != MAX_PATH_LEN) {
+            perror("Error reading entry path");
+            fclose(bin_file);
+            json_object_put(config_json);
+            json_object_put(manifest_json);
+            return;
+        }
+
+        printf("Entry %d: path=%s\n", i, path);
+
+        // For files
+        size_t file_size;
+        if (fread(&file_size, sizeof(size_t), 1, bin_file) != 1) {
+            perror("Error reading file size");
+            fclose(bin_file);
+            json_object_put(config_json);
+            json_object_put(manifest_json);
+            return;
+        }
+
+        // Create blob for each file
+        char blob_path[MAX_PATH_LEN];
+        snprintf(blob_path, sizeof(blob_path), "%s/%s", blobs_dir, path);
+        // Ensure the directory exists before creating the file
+        char *last_slash = strrchr(blob_path, '/');
+        if (last_slash != NULL) {
+            *last_slash = '\0'; // Temporarily null-terminate the path to create directories
+            create_directory_if_needed(blob_path);
+            *last_slash = '/'; // Restore the path
+        }
+
+        FILE *blob_file = fopen(blob_path, "wb");
+        if (blob_file == NULL) {
+            perror("Error creating blob file");
+            continue;
+        }
+
+        size_t remaining = file_size;
+        while (remaining > 0) {
+            size_t to_read = (remaining < CHUNK_SIZE) ? remaining : CHUNK_SIZE;
+            size_t bytes_read = fread(buffer, 1, to_read, bin_file);
+            if (bytes_read == 0) {
+                if (feof(bin_file)) {
+                    fprintf(stderr, "Unexpected end of file while reading file data\n");
+                } else {
+                    perror("Error reading file data");
+                }
+                break;
+            }
+            fwrite(buffer, 1, bytes_read, blob_file);
+            remaining -= bytes_read;
+        }
+        fclose(blob_file);
+
+        // Add layer to manifest
+        json_object *layer = json_object_new_object();
+        json_object_object_add(layer, "mediaType", json_object_new_string("application/vnd.oci.image.layer.v1.tar"));
+        json_object_object_add(layer, "size", json_object_new_int64(file_size));
+        json_object_object_add(layer, "digest", json_object_new_string("sha256:layerdigest")); // Replace with actual digest
+        json_object_array_add(layers_array, layer);
+    }
+
+    // Write manifest
+    char manifest_path[MAX_PATH_LEN];
+    snprintf(manifest_path, sizeof(manifest_path), "%s/manifest.json", output_dir);
+    FILE *manifest_file = fopen(manifest_path, "w");
+    if (manifest_file == NULL) {
+        perror("Error creating manifest file");
+        fclose(bin_file);
+        json_object_put(config_json);
+        json_object_put(manifest_json);
+        return;
+    }
+    fprintf(manifest_file, "%s", json_object_to_json_string_ext(manifest_json, JSON_C_TO_STRING_PRETTY));
+    fclose(manifest_file);
+
+    fclose(bin_file);
+    json_object_put(config_json);
+    json_object_put(manifest_json);
+    printf("OCI container structure created in %s\n", output_dir);
+}
+
 int main(int argc, char *argv[]) {
     PluginManager plugin_manager;
     plugin_manager_init(&plugin_manager);
@@ -2095,7 +2438,7 @@ int main(int argc, char *argv[]) {
         create_isolated_environment(bin_file, argv[2], &network);
         fclose(bin_file);
     } else if (strcmp(argv[1], "--version") == 0) {
-        printf("Osxiec version 0.65\n");
+        printf("Osxiec version 0.66\n");
     } else if (strcmp(argv[1], "-pull") == 0) {
         if (argc != 3) {
             printf("Usage: %s -pull <file_name>\n", argv[0]);
@@ -2122,6 +2465,12 @@ int main(int argc, char *argv[]) {
         }
         const char *custom_dockerfile = (argc == 6) ? argv[5] : NULL;
         convert_to_docker(argv[2], argv[3], argv[4], custom_dockerfile);
+    } else if (strcmp(argv[1], "-convert-to-oci") == 0) {
+        if (argc < 6 || argc > 7) {
+            fprintf(stderr, "Usage: %s -convert-to-oci <bin_file> <output_directory> <arch> <author> <date>\n", argv[0]);
+            return EXIT_FAILURE;
+        }
+        convert_to_oci(argv[2], argv[3], argv[4], argv[5], argv[6]);
     } else if (strcmp(argv[1], "-deploy") == 0) {
         if (argc < 3) {
             fprintf(stderr, "Usage: %s -deploy <config_file> [-port <port>]\n", argv[0]);
@@ -2187,6 +2536,8 @@ int main(int argc, char *argv[]) {
         printf("Uploads a file to Osxiec Hub\n");
         printf("  -convert-to-docker <bin_file> <output_directory> <base_image> [custom_dockerfile]\n");
         printf("Converts a binary file to a docker image\n");
+        printf("  -convert-to-oci <bin_file> <output_directory> <arch> <author> <date>\n");
+        printf("Converts a binary file to an oci image\n");
         printf("  -clean\n");
         printf("Cleans up container disk images from /tmp directory.\n");
         printf("  -deploy <config_file> [-port <port>]\n");
