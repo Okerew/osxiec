@@ -13,7 +13,8 @@ ____
 ## Dependencies
 **HomeBrew for installing dependencies**
 ```sh
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+/arch -x86_64 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+
 ```
 **Curl**
 ```sh
