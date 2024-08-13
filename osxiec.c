@@ -16,7 +16,7 @@
 #include <stdbool.h>
 #include "osxiec_script/osxiec_script.h"
 #include <libgen.h>
-#include "/opt/homebrew/Cellar/json-c/0.17/include/json-c/json.h"
+#include "/usr/local/Cellar/json-c/0.17/include/json-c/json.h"
 #include <termios.h>
 
 #define MAX_COMMAND_LEN 1024
