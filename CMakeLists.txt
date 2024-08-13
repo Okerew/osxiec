@@ -4,7 +4,8 @@ project(osxiec C)
 set(CMAKE_C_STANDARD 11)
 
 # Add executable
-add_executable(osxiec osxiec.c
+add_executable(osxiec
+        osxiec.c
         plugin_manager/plugin.h
         plugin_manager/plugin_manager.h
         plugin_manager/plugin_manager.c
@@ -17,9 +18,12 @@ add_executable(osxiec osxiec.c
 find_package(CURL REQUIRED)
 target_link_libraries(osxiec PRIVATE CURL::libcurl)
 
-# Manually specify Readline library and include paths
+# Find and link Readline
 include_directories(/opt/homebrew/opt/readline/include)
-link_directories(/opt/homebrew/opt/readline/lib)
-
-# Link Readline library
+target_link_directories(osxiec PRIVATE /opt/homebrew/opt/readline/lib)
 target_link_libraries(osxiec PRIVATE readline)
+
+# Find and link json-c
+include_directories(/opt/homebrew/Cellar/json-c/0.17/include)
+target_link_directories(osxiec PRIVATE /opt/homebrew/Cellar/json-c/0.17/lib)
+target_link_libraries(osxiec PRIVATE json-c)
