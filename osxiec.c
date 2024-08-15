@@ -620,6 +620,118 @@ void containerize_directory(const char *dir_path, const char *output_file, const
     security_scan(output_file);
 }
 
+void containerize_directory_with_bin_file(const char *dir_path, const char *input_bin_file, const char *output_file, const char *start_config_file) {
+    FILE *bin_file = fopen(output_file, "wb");
+    if (bin_file == NULL) {
+        perror("Error opening output file");
+        exit(EXIT_FAILURE);
+    }
+
+    File *files = malloc(sizeof(File) * MAX_FILES);
+    if (files == NULL) {
+        perror("Error allocating memory for files");
+        fclose(bin_file);
+        exit(EXIT_FAILURE);
+    }
+
+    int num_files = 0;
+
+    // Write config
+    ContainerConfig config = {
+        .name = "default_container",
+        .memory_soft_limit = 384 * 1024 * 1024,
+        .memory_hard_limit = 512 * 1024 * 1024,
+        .cpu_priority = 20,
+        .network_mode = "host",
+        .container_uid = 1000,
+        .container_gid = 1000
+    };
+    if (start_config_file) {
+        strncpy(config.start_config, start_config_file, MAX_PATH_LEN - 1);
+        config.start_config[MAX_PATH_LEN - 1] = '\0';
+    } else {
+        config.start_config[0] = '\0';
+    }
+
+    // Read files from directory
+    int dir_files = read_files(dir_path, files, config.container_uid, config.container_gid);
+    if (dir_files < 0) {
+        free(files);
+        fclose(bin_file);
+        exit(EXIT_FAILURE);
+    }
+    num_files += dir_files;
+
+    // Read files from input bin file
+    if (input_bin_file) {
+        FILE *input_bin = fopen(input_bin_file, "rb");
+        if (input_bin == NULL) {
+            perror("Error opening input bin file");
+            free(files);
+            fclose(bin_file);
+            exit(EXIT_FAILURE);
+        }
+
+        ContainerConfig input_config;
+        fread(&input_config, sizeof(ContainerConfig), 1, input_bin);
+
+        int input_num_files;
+        fread(&input_num_files, sizeof(int), 1, input_bin);
+
+        for (int i = 0; i < input_num_files; i++) {
+            File *file = &files[num_files + i];
+            fread(file->name, sizeof(char), MAX_PATH_LEN, input_bin);
+            fread(&file->size, sizeof(size_t), 1, input_bin);
+            file->data = malloc(file->size);
+            if (file->data == NULL) {
+                perror("Error allocating memory for file data");
+                fclose(input_bin);
+                free(files);
+                fclose(bin_file);
+                exit(EXIT_FAILURE);
+            }
+            fread(file->data, 1, file->size, input_bin);
+        }
+
+        num_files += input_num_files;
+        fclose(input_bin);
+    }
+
+    fwrite(&config, sizeof(ContainerConfig), 1, bin_file);
+    fwrite(&num_files, sizeof(int), 1, bin_file);
+
+    // Display the progress bar
+    int progress_bar_width = 50;
+    printf("Containerizing [");
+    fflush(stdout);
+
+    for (int i = 0; i < num_files; i++) {
+        fwrite(files[i].name, sizeof(char), MAX_PATH_LEN, bin_file);
+        fwrite(&files[i].size, sizeof(size_t), 1, bin_file);
+        fwrite(files[i].data, 1, files[i].size, bin_file);
+        free(files[i].data);
+
+        // Update the progress bar
+        int progress = (i + 1) * progress_bar_width / num_files;
+        for (int j = 0; j < progress; j++) {
+            printf("#");
+            fflush(stdout);
+        }
+        for (int j = progress; j < progress_bar_width; j++) {
+            printf(" ");
+            fflush(stdout);
+        }
+        printf("] %d%%\r", (i + 1) * 100 / num_files);
+        fflush(stdout);
+    }
+
+    printf("\n");
+
+    free(files);
+    fclose(bin_file);
+
+    security_scan(output_file);
+}
 
 void *monitor_memory_usage(void *arg) {
     ContainerConfig *config = (ContainerConfig *)arg;
@@ -1128,7 +1240,53 @@ void navigate_history(char *command, int *command_index, int *cursor_pos, int di
     }
 }
 
+volatile sig_atomic_t stop_thread = 0;
+
+void signal_handler(int signum) {
+    stop_thread = 1;
+}
+
+void *logger_thread(void *arg) {
+    FILE *log_file = fopen("/Volumes/Container/log.txt", "w");
+    if (log_file == NULL) {
+        perror("Failed to open log file");
+        return NULL;
+    }
+
+    while (!stop_thread) {
+        struct rusage usage;
+        if (getrusage(RUSAGE_SELF, &usage) == 0) {
+            long memory_used = usage.ru_maxrss;
+            double cpu_usage = get_cpu_usage();
+
+            fprintf(log_file, "Memory Usage: %ld bytes\n", memory_used);
+            fprintf(log_file, "CPU Usage: %.2f%%\n", cpu_usage);
+            fprintf(log_file, "CPU Priority: %d\n", ((ContainerConfig *)arg)->cpu_priority);
+
+        } else {
+            perror("Failed to get resource usage");
+        }
+
+        sleep(5);
+    }
+
+    fclose(log_file);
+    return NULL;
+}
+
+volatile sig_atomic_t should_exit = 0;
+
+void handle_signal(int sig) {
+    // Set the should_exit flag when a signal is received
+    if (sig == SIGTERM || sig == SIGINT || sig == SIGSEGV) {
+        should_exit = 1;
+    }
+}
+
 void create_isolated_environment(FILE *bin_file, const char *bin_file_path, ContainerNetwork *network) {
+    signal(SIGTERM, handle_signal);
+    signal(SIGINT, handle_signal);
+    signal(SIGSEGV, handle_signal);
     ContainerConfig config;
     fread(&config, sizeof(ContainerConfig), 1, bin_file);
 
@@ -1272,7 +1430,13 @@ void create_isolated_environment(FILE *bin_file, const char *bin_file_path, Cont
 
     set_terminal_raw_mode();
 
+    pthread_t logger;
+    pthread_create(&logger, NULL, logger_thread, &config);
     while (1) {
+        if (should_exit) {
+            break;
+        }
+
         printf("> ");
         fflush(stdout);
 
@@ -1352,6 +1516,16 @@ void create_isolated_environment(FILE *bin_file, const char *bin_file_path, Cont
 
                 printf("\n");
                 add_to_history(command);
+                FILE *log_file = fopen("/Volumes/Container/log.txt", "a");
+                if (log_file == NULL) {
+                    perror("Failed to open log file");
+                } else {
+                    fprintf(log_file, "\nCommand History:\n");
+                    for (int i = 0; i < command_index; i++) {
+                        fprintf(log_file, "Command %d: %s\n", i + 1, history.commands[i]);
+                    }
+                    fclose(log_file);
+                }
                 command_index = 0;
                 cursor_pos = 0;
                 set_terminal_raw_mode();
@@ -1374,9 +1548,12 @@ exit_loop:
     set_terminal_canonical_mode();
     printf("Container terminated.\n");
 
-    // Clean up the network thread
+    // Clean up the threads
     pthread_cancel(network_thread);
     pthread_join(network_thread, NULL);
+
+    pthread_cancel(logger);
+    pthread_join(logger, NULL);
 
     // Cleanup container state
     for (int i = 0; i < container_state.num_env_vars; i++) {
@@ -1386,18 +1563,18 @@ exit_loop:
 }
 
 void ocreate_isolated_environment(FILE *bin_file, const char *bin_file_path) {
-    // This is a version of create_isolated_environment that is offline and doesn't use any ports or networking.
+    signal(SIGTERM, handle_signal);
+    signal(SIGINT, handle_signal);
+    signal(SIGSEGV, handle_signal);
     ContainerConfig config;
     fread(&config, sizeof(ContainerConfig), 1, bin_file);
 
     int num_files;
     fread(&num_files, sizeof(int), 1, bin_file);
 
-    // Create shared folder if it doesn't exist
     char shared_folder_path[] = "/Volumes/SharedContainer";
     mkdir(shared_folder_path, 0755);
 
-    // Create and mount disk image for file system isolation
     char disk_image_path[MAX_PATH_LEN];
     snprintf(disk_image_path, sizeof(disk_image_path), "/tmp/container_disk_%d.dmg", getpid());
 
@@ -1405,7 +1582,7 @@ void ocreate_isolated_environment(FILE *bin_file, const char *bin_file_path) {
     snprintf(create_disk_command, sizeof(create_disk_command), "hdiutil create -size 1g -fs HFS+ -volname Container %s", disk_image_path);
     system(create_disk_command);
 
-    chmod(disk_image_path, 0644);  // rw-r--r--
+    chmod(disk_image_path, 0644);
 
     char mount_command[MAX_COMMAND_LEN];
     snprintf(mount_command, sizeof(mount_command), "hdiutil attach %s", disk_image_path);
@@ -1413,12 +1590,10 @@ void ocreate_isolated_environment(FILE *bin_file, const char *bin_file_path) {
 
     char container_root[] = "/Volumes/Container";
 
-    // Create a symbolic link to the shared folder
     char shared_mount_point[MAX_PATH_LEN];
     snprintf(shared_mount_point, sizeof(shared_mount_point), "%s/shared", container_root);
     symlink(shared_folder_path, shared_mount_point);
 
-    // Extract files
     for (int i = 0; i < num_files; i++) {
         File file;
         fread(file.name, sizeof(char), MAX_PATH_LEN, bin_file);
@@ -1435,7 +1610,6 @@ void ocreate_isolated_environment(FILE *bin_file, const char *bin_file_path) {
         char file_path[MAX_PATH_LEN];
         snprintf(file_path, sizeof(file_path), "%s/%s", container_root, file.name);
 
-        // Ensure all necessary directories exist
         create_directories(file_path);
 
         FILE *out_file = fopen(file_path, "wb");
@@ -1470,7 +1644,6 @@ void ocreate_isolated_environment(FILE *bin_file, const char *bin_file_path) {
 
     apply_resource_limits(&config);
 
-    // Updated sandbox profile
     char sandbox_profile[1024];
     snprintf(sandbox_profile, sizeof(sandbox_profile),
         "(version 1)"
@@ -1521,7 +1694,14 @@ void ocreate_isolated_environment(FILE *bin_file, const char *bin_file_path) {
 
     set_terminal_raw_mode();
 
+    pthread_t logger;
+    pthread_create(&logger, NULL, logger_thread, &config);
+
     while (1) {
+        if (should_exit) {
+            break;
+        }
+
         printf("> ");
         fflush(stdout);
 
@@ -1601,6 +1781,16 @@ void ocreate_isolated_environment(FILE *bin_file, const char *bin_file_path) {
 
                 printf("\n");
                 add_to_history(command);
+                FILE *log_file = fopen("/Volumes/Container/log.txt", "a");
+                if (log_file == NULL) {
+                    perror("Failed to open log file");
+                } else {
+                    fprintf(log_file, "\nCommand History:\n");
+                    for (int i = 0; i < command_index; i++) {
+                        fprintf(log_file, "Command %d: %s\n", i + 1, history.commands[i]);
+                    }
+                    fclose(log_file);
+                }
                 command_index = 0;
                 cursor_pos = 0;
                 set_terminal_raw_mode();
@@ -1623,7 +1813,9 @@ exit_loop:
     set_terminal_canonical_mode();
     printf("Container terminated.\n");
 
-    // Cleanup container state
+    pthread_cancel(logger);
+    pthread_join(logger, NULL);
+
     for (int i = 0; i < container_state.num_env_vars; i++) {
         free(container_state.environment_variables[i]);
     }
@@ -2349,6 +2541,19 @@ int main(int argc, char *argv[]) {
         const char *start_config_file = (argc > 4) ? argv[4] : NULL;
         containerize_directory(argv[2], argv[3], start_config_file);
         printf("Directory contents containerized into '%s'.\n", argv[3]);
+    } else if (strcmp(argv[1], "-craft") == 0) {
+        if (argc < 5) {
+            fprintf(stderr, "Usage for craft: %s -craft <directory_path> <input_bin_file> <output_file>\n", argv[0]);
+            return EXIT_FAILURE;
+        }
+        if (geteuid() != 0) {
+            fprintf(stderr, "This program must be run as root. Try using sudo.\n");
+            return EXIT_FAILURE;
+        }
+
+        const char *start_config_file = (argc > 5) ? argv[5] : NULL;
+        containerize_directory_with_bin_file(argv[2], argv[3], argv[4], start_config_file);
+        printf("Directory contents containerized into '%s'.\n", argv[4]);
     } else if (strcmp(argv[1], "-execute") == 0) {
         if (argc < 3) {
             fprintf(stderr, "Usage for execute: %s -execute <bin_file> [-port <port>]\n", argv[0]);
@@ -2438,7 +2643,7 @@ int main(int argc, char *argv[]) {
         create_isolated_environment(bin_file, argv[2], &network);
         fclose(bin_file);
     } else if (strcmp(argv[1], "--version") == 0) {
-        printf("Osxiec version 0.66\n");
+        printf("Osxiec version 0.68\n");
     } else if (strcmp(argv[1], "-pull") == 0) {
         if (argc != 3) {
             printf("Usage: %s -pull <file_name>\n", argv[0]);
@@ -2520,6 +2725,8 @@ int main(int argc, char *argv[]) {
         printf("Available commands:\n");
         printf("  -contain <directory_path> <output_file> <path_to_start_config_file>\n");
         printf("Contains a directory into a container file\n");
+        printf(" -craft <directory_path> <input_bin_file> <output_file> <path_to_start_config_file>\n");
+        printf("Crafts a container file from a directory and a bin file\n");
         printf("  -execute <directory_path> [-port <port>]\n");
         printf("Executes a container file\n");
         printf(" -oexec <container_file>\n");
