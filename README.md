@@ -156,6 +156,11 @@ sudo osxiec -extract {bin_file_path}
 osxiec -convert-to-oci {bin_file_path} {output_path} {arch} {author} 
 ```
 
+**Craft** crafts a container from a directory and a bin input file
+```sh
+sudo osxiec -craft {directory_path} {bin_input_file} {output_file} {start_config_file}
+```
+
 ## Creating a container
 Make sure to include any dependencies or executables you can obtain these by searching for where a dependency or executable is located and copying it along with it's dependencies.
 
@@ -463,13 +468,6 @@ mkdir {build-directory}
 cd {build-directory}
 cmake -S .. -B . -G "Ninja"
 ninja
-```
-
-**Build terminal**
-golang is required for this one
-``` sh
-cd term
-go build term.go
 ```
 
 **Give permissions to scripts if needed**
