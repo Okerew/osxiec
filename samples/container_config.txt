@@ -1,0 +1,7 @@
+name=my_custom_container
+memory_soft_limit=536870912
+memory_hard_limit=1073741824
+cpu_priority=10
+network_mode=bridge
+container_uid=1001
+container_gid=1001
