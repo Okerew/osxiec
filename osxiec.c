@@ -36,6 +36,7 @@
 #define MIN_CPU_PRIORITY -20 // Minimum nice value
 #define MAX_MEMORY_LIMIT 2147483648 // 2 GB max memory limit
 #define MAX_HISTORY_LEN 100
+#define MAX_LINE_LEN 1024
 
 int port = PORT;
 
@@ -544,7 +545,40 @@ void security_scan(const char *bin_file) {
     fclose(file);
 }
 
-void containerize_directory(const char *dir_path, const char *output_file, const char *start_config_file) {
+void read_config_file(const char *filename, ContainerConfig *config) {
+    FILE *file = fopen(filename, "r");
+    if (file == NULL) {
+        perror("Error opening config file");
+        exit(EXIT_FAILURE);
+    }
+
+    char line[MAX_LINE_LEN];
+    while (fgets(line, sizeof(line), file)) {
+        char key[64], value[MAX_LINE_LEN];
+        if (sscanf(line, "%63[^=]=%[^\n]", key, value) == 2) {
+            if (strcmp(key, "name") == 0) {
+                strncpy(config->name, value, sizeof(config->name) - 1);
+            } else if (strcmp(key, "memory_soft_limit") == 0) {
+                config->memory_soft_limit = strtoul(value, NULL, 10);
+            } else if (strcmp(key, "memory_hard_limit") == 0) {
+                config->memory_hard_limit = strtoul(value, NULL, 10);
+            } else if (strcmp(key, "cpu_priority") == 0) {
+                config->cpu_priority = atoi(value);
+            } else if (strcmp(key, "network_mode") == 0) {
+                strncpy(config->network_mode, value, sizeof(config->network_mode) - 1);
+            } else if (strcmp(key, "container_uid") == 0) {
+                config->container_uid = atoi(value);
+            } else if (strcmp(key, "container_gid") == 0) {
+                config->container_gid = atoi(value);
+            }
+        }
+    }
+
+    fclose(file);
+}
+
+
+void containerize_directory(const char *dir_path, const char *output_file, const char *start_config_file, const char *container_config_file) {
     FILE *bin_file = fopen(output_file, "wb");
     if (bin_file == NULL) {
         perror("Error opening output file");
@@ -560,7 +594,7 @@ void containerize_directory(const char *dir_path, const char *output_file, const
 
     int num_files;
 
-    // Write config
+    // Initialize default config
     ContainerConfig config = {
         .name = "default_container",
         .memory_soft_limit = 384 * 1024 * 1024,
@@ -568,8 +602,14 @@ void containerize_directory(const char *dir_path, const char *output_file, const
         .cpu_priority = 20,
         .network_mode = "host",
         .container_uid = 1000,
-        .container_gid = 1000
+        .container_gid = 1000,
+        .start_config = ""
     };
+
+    if (container_config_file) {
+        read_config_file(container_config_file, &config);
+    }
+
     if (start_config_file) {
         strncpy(config.start_config, start_config_file, MAX_PATH_LEN - 1);
         config.start_config[MAX_PATH_LEN - 1] = '\0';
@@ -620,7 +660,7 @@ void containerize_directory(const char *dir_path, const char *output_file, const
     security_scan(output_file);
 }
 
-void containerize_directory_with_bin_file(const char *dir_path, const char *input_bin_file, const char *output_file, const char *start_config_file) {
+void containerize_directory_with_bin_file(const char *dir_path, const char *input_bin_file, const char *output_file, const char *start_config_file, const char *container_config_file) {
     FILE *bin_file = fopen(output_file, "wb");
     if (bin_file == NULL) {
         perror("Error opening output file");
@@ -636,7 +676,7 @@ void containerize_directory_with_bin_file(const char *dir_path, const char *inpu
 
     int num_files = 0;
 
-    // Write config
+    // Initialize default config
     ContainerConfig config = {
         .name = "default_container",
         .memory_soft_limit = 384 * 1024 * 1024,
@@ -644,13 +684,18 @@ void containerize_directory_with_bin_file(const char *dir_path, const char *inpu
         .cpu_priority = 20,
         .network_mode = "host",
         .container_uid = 1000,
-        .container_gid = 1000
+        .container_gid = 1000,
+        .start_config = ""
     };
+
+    // Load config from file if provided
+    if (container_config_file) {
+        read_config_file(container_config_file, &config);
+    }
+
     if (start_config_file) {
         strncpy(config.start_config, start_config_file, MAX_PATH_LEN - 1);
         config.start_config[MAX_PATH_LEN - 1] = '\0';
-    } else {
-        config.start_config[0] = '\0';
     }
 
     // Read files from directory
@@ -2129,6 +2174,7 @@ void deploy_container(const char *config_file, int deploy_port) {
     char container_file[MAX_PATH_LEN] = {0};
     char network_name[MAX_PATH_LEN] = {0};
     char start_config[MAX_PATH_LEN] = {0};
+    char container_config[MAX_PATH_LEN] = {0};
 
     char line[MAX_COMMAND_LEN];
     while (fgets(line, sizeof(line), file)) {
@@ -2154,7 +2200,7 @@ void deploy_container(const char *config_file, int deploy_port) {
     }
 
     // Contain the directory
-    containerize_directory(source_dir, container_file, start_config[0] != '\0' ? start_config : NULL);
+    containerize_directory(source_dir, container_file, start_config[0] != '\0' ? start_config : NULL, container_config[0] != '\0' ? container_config : NULL);
     printf("Directory contents containerized into '%s'.\n", container_file);
 
     // Load network configuration
@@ -2530,7 +2576,7 @@ int main(int argc, char *argv[]) {
 
     if (strcmp(argv[1], "-contain") == 0) {
         if (argc < 4) {
-            fprintf(stderr, "Usage for containerize: %s -contain <directory_path> <output_file> [start_config_file]\n", argv[0]);
+            fprintf(stderr, "Usage for containerize: %s -contain <directory_path> <output_file> [start_config_file] [container_config_file]\n", argv[0]);
             return EXIT_FAILURE;
         }
         if (geteuid() != 0) {
@@ -2539,11 +2585,12 @@ int main(int argc, char *argv[]) {
         }
 
         const char *start_config_file = (argc > 4) ? argv[4] : NULL;
-        containerize_directory(argv[2], argv[3], start_config_file);
+        const char *container_config_file = (argc > 5) ? argv[5] : NULL;
+        containerize_directory(argv[2], argv[3], start_config_file, container_config_file);
         printf("Directory contents containerized into '%s'.\n", argv[3]);
     } else if (strcmp(argv[1], "-craft") == 0) {
         if (argc < 5) {
-            fprintf(stderr, "Usage for craft: %s -craft <directory_path> <input_bin_file> <output_file>\n", argv[0]);
+            fprintf(stderr, "Usage for craft: %s -craft <directory_path> <input_bin_file> <output_file> <start_config_file> <container_config_file>\n", argv[0]);
             return EXIT_FAILURE;
         }
         if (geteuid() != 0) {
@@ -2552,7 +2599,8 @@ int main(int argc, char *argv[]) {
         }
 
         const char *start_config_file = (argc > 5) ? argv[5] : NULL;
-        containerize_directory_with_bin_file(argv[2], argv[3], argv[4], start_config_file);
+        const char *container_config_file = (argc > 6) ? argv[6] : NULL;
+        containerize_directory_with_bin_file(argv[2], argv[3], argv[4], start_config_file, container_config_file);
         printf("Directory contents containerized into '%s'.\n", argv[4]);
     } else if (strcmp(argv[1], "-execute") == 0) {
         if (argc < 3) {
@@ -2643,7 +2691,7 @@ int main(int argc, char *argv[]) {
         create_isolated_environment(bin_file, argv[2], &network);
         fclose(bin_file);
     } else if (strcmp(argv[1], "--version") == 0) {
-        printf("Osxiec version 0.68\n");
+        printf("Osxiec version 0.69\n");
     } else if (strcmp(argv[1], "-pull") == 0) {
         if (argc != 3) {
             printf("Usage: %s -pull <file_name>\n", argv[0]);
@@ -2723,9 +2771,9 @@ int main(int argc, char *argv[]) {
         extract_container(argv[2], argv[3]);
     } else if (strcmp(argv[1], "-help") == 0) {
         printf("Available commands:\n");
-        printf("  -contain <directory_path> <output_file> <path_to_start_config_file>\n");
+        printf("  -contain <directory_path> <output_file> <path_to_start_config_file> <path_to_container_config_file>\n");
         printf("Contains a directory into a container file\n");
-        printf(" -craft <directory_path> <input_bin_file> <output_file> <path_to_start_config_file>\n");
+        printf(" -craft <directory_path> <input_bin_file> <output_file> <path_to_start_config_file> <path_to_container_config_file>\n");
         printf("Crafts a container file from a directory and a bin file\n");
         printf("  -execute <directory_path> [-port <port>]\n");
         printf("Executes a container file\n");
