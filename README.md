@@ -67,7 +67,7 @@ To update to a new release, repeat steps 1, 2, and 3 if using osxiec_gui also st
 
 **Containerize a Directory**: containerizes a directory
 ```sh
-sudo osxiec -contain {directory_path} {some_name}.bin {path_to_config_file_in_directory_path}
+sudo osxiec -contain {directory_path} {some_name}.bin {path_to_config_file_in_directory_path} {container_config_file}
 ```
 
 **Execute a Container**: executes container
@@ -158,7 +158,7 @@ osxiec -convert-to-oci {bin_file_path} {output_path} {arch} {author}
 
 **Craft** crafts a container from a directory and a bin input file
 ```sh
-sudo osxiec -craft {directory_path} {bin_input_file} {output_file} {start_config_file}
+sudo osxiec -craft {directory_path} {bin_input_file} {output_file} {start_config_file} {container_config_file}
 ```
 
 ## Creating a container
