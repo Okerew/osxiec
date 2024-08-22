@@ -43,7 +43,6 @@ https://apps.apple.com/us/app/xcode/id497799835?mt=12
 
 1. **Download the Release**:
    Download the `osxiec_cli.tar.gz` and `osxiec_gui.tar.gz` if you want a gui app file from the releases section.
-
 2. **Extract the Archive**:
    ```sh
    tar -xvzf osxiec_cli.tar.gz
@@ -70,15 +69,6 @@ To update to a new release, repeat steps 1, 2, and 3 if using osxiec_gui also st
 sudo osxiec -contain {directory_path} {some_name}.bin {path_to_config_file_in_directory_path} {container_config_file}
 ```
 
-**Execute a Container**: executes container
-```sh
-sudo osxiec -execute {some_name}.bin 
-```
-
-**Execute with Port Argument**: execute with port
-```sh
-sudo osxiec -execute {some_name} -port {PORT_NUMBER}
-```
 **Create a cluster ( virtualized network )** create a cluster
 ```sh
 sudo osxiec -network create {network_name} {vlan_id}
@@ -89,8 +79,10 @@ sudo osxiec -network remove {network_name} {vlan_id}
 ```
 **Run with vlan config** run with vlan config
 ``` sh
-sudo osxiec -run {some_name} {network_name} -port {PORT_NUMBER}
+sudo osxiec -run {some_name.bin} {network_name} -port {PORT_NUMBER}
 ```
+port argument is optional
+
 **Version** checks the current version
 ```sh
 osxiec --version
@@ -161,6 +153,22 @@ osxiec -convert-to-oci {bin_file_path} {output_path} {arch} {author}
 sudo osxiec -craft {directory_path} {bin_input_file} {output_file} {start_config_file} {container_config_file}
 ```
 
+**Check for update** checks for update
+```sh
+osxiec -check-for-update
+```
+
+**Start** starts a container a stopped container
+```sh
+osxiec -start {volume_name} {network} -port {PORT_NUMBER} 
+```
+port is optional
+
+**Ostart** starts a container a stopped container in offline mode
+```sh
+osxiec -ostart {volume_name} 
+```
+
 ## Creating a container
 Make sure to include any dependencies or executables you can obtain these by searching for where a dependency or executable is located and copying it along with it's dependencies.
 
@@ -204,9 +212,9 @@ This will also scan the container for security vulnerabilities.
 After creating a container or downloading one.
 **You can execute one with**
 
-`osxiec -execute {container_name}`
+`osxiec -oexec {container_name}`
 
-If you want you can also use a custom port with `-port {PORT_NUMBER}`
+This will execute it in offline mode. If you want to execute it in online mode see the next point.
 
 **Run with vlan**
 
@@ -233,6 +241,7 @@ If you want to access the container terminal just press enter.
 5. **xs** Execute an osxs script command
 6. **autoscale** automatically scales the resources of the container
 7. **status** shows the status of the container
+8. **stop** stops the container.
 ## Creating a vlan network
 To create a network you can run `osxiec -network create {network_name} {vlan_id}`
 
