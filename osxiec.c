@@ -37,6 +37,7 @@
 #define MAX_MEMORY_LIMIT 2147483648 // 2 GB max memory limit
 #define MAX_HISTORY_LEN 100
 #define MAX_LINE_LEN 1024
+#define VERSION "0.7"
 
 int port = PORT;
 
@@ -1350,7 +1351,7 @@ void create_isolated_environment(FILE *bin_file, const char *bin_file_path, Cont
     snprintf(disk_image_path, sizeof(disk_image_path), "/tmp/container_disk_%d.dmg", getpid());
 
     char create_disk_command[MAX_COMMAND_LEN];
-    snprintf(create_disk_command, sizeof(create_disk_command), "hdiutil create -size 1g -fs HFS+ -volname Container %s", disk_image_path);
+    snprintf(create_disk_command, sizeof(create_disk_command), "hdiutil create -size 1g -fs HFS+ -volname \"%s\" %s", bin_file_path, disk_image_path);
     system(create_disk_command);
 
     chmod(disk_image_path, 0644);  // rw-r--r--
@@ -1359,7 +1360,8 @@ void create_isolated_environment(FILE *bin_file, const char *bin_file_path, Cont
     snprintf(mount_command, sizeof(mount_command), "hdiutil attach %s", disk_image_path);
     system(mount_command);
 
-    char container_root[] = "/Volumes/Container";
+    char container_root[MAX_PATH_LEN];
+    snprintf(container_root, sizeof(container_root), "/Volumes/%s", bin_file_path);
 
     // Create a symbolic link to the shared folder
     char shared_mount_point[MAX_PATH_LEN];
@@ -1454,8 +1456,9 @@ void create_isolated_environment(FILE *bin_file, const char *bin_file_path, Cont
         exit(1);
     }
 
-    printf("\n=== Container Terminal ===\n");
+    printf("\n=== Container %s Terminal ===\n", bin_file_path);
     printf("Enter commands (type 'exit' to quit, help for help):\n");
+    printf("If you just ran the container ignore the first log file error");
 
     // Start the network listener in a separate thread
     pthread_t network_thread;
@@ -1555,13 +1558,41 @@ void create_isolated_environment(FILE *bin_file, const char *bin_file_path, Cont
                     printf("  autoscale: Start automatic resource scaling\n");
                     printf("  status: Print current resource usage\n");
                     printf("  help: Print this help message\n");
+                    printf("  stop: Stops the container and save its state\n");
+                } else if (strcmp(command, "stop") == 0) {
+                    printf("Stopping container...\n");
+
+                    // Save the container state
+                    char state_file_path[MAX_PATH_LEN];
+                    time_t now = time(NULL);
+
+                    // Construct the state file path using the Unix timestamp
+                    snprintf(state_file_path, sizeof(state_file_path), "%s/%ld_%s", container_root, now, bin_file_path);
+
+                    // state_file_path now includes the date
+                    FILE *state_file = fopen(state_file_path, "wb");
+                    if (state_file == NULL) {
+                        perror("Error creating container state file");
+                    } else {
+                        // Save the container configuration
+                        fwrite(&config, sizeof(ContainerConfig), 1, state_file);
+
+                        // Save the environment variables
+                        fwrite(&container_state, sizeof(ContainerState), 1, state_file);
+                        fclose(state_file);
+                        printf("Container state saved to %s\n", state_file_path);
+                    }
+
+                    goto stop_loop;
                 } else {
                     execute_command(command);
                 }
 
                 printf("\n");
                 add_to_history(command);
-                FILE *log_file = fopen("/Volumes/Container/log.txt", "a");
+                char log_file_path[MAX_PATH_LEN];
+                snprintf(log_file_path, sizeof(log_file_path), "%s/log.txt", container_root);
+                FILE *log_file = fopen(log_file_path, "a");
                 if (log_file == NULL) {
                     perror("Failed to open log file");
                 } else {
@@ -1605,7 +1636,23 @@ exit_loop:
         free(container_state.environment_variables[i]);
     }
     free(container_state.environment_variables);
+
+stop_loop:
+    set_terminal_canonical_mode();
+    printf("Container stopped.\n");
+
+    pthread_cancel(network_thread);
+    pthread_join(network_thread, NULL);
+
+    pthread_cancel(logger);
+    pthread_join(logger, NULL);
+
+    // Preserve the environment variables
+    for (int i = 0; i < container_state.num_env_vars; i++) {
+        setenv(container_state.environment_variables[i], NULL, 1);
+    }
 }
+
 
 void ocreate_isolated_environment(FILE *bin_file, const char *bin_file_path) {
     signal(SIGTERM, handle_signal);
@@ -1623,8 +1670,9 @@ void ocreate_isolated_environment(FILE *bin_file, const char *bin_file_path) {
     char disk_image_path[MAX_PATH_LEN];
     snprintf(disk_image_path, sizeof(disk_image_path), "/tmp/container_disk_%d.dmg", getpid());
 
+    // Assign the volume name as the bin_file_path
     char create_disk_command[MAX_COMMAND_LEN];
-    snprintf(create_disk_command, sizeof(create_disk_command), "hdiutil create -size 1g -fs HFS+ -volname Container %s", disk_image_path);
+    snprintf(create_disk_command, sizeof(create_disk_command), "hdiutil create -size 1g -fs HFS+ -volname \"%s\" %s", bin_file_path, disk_image_path);
     system(create_disk_command);
 
     chmod(disk_image_path, 0644);
@@ -1633,7 +1681,9 @@ void ocreate_isolated_environment(FILE *bin_file, const char *bin_file_path) {
     snprintf(mount_command, sizeof(mount_command), "hdiutil attach %s", disk_image_path);
     system(mount_command);
 
-    char container_root[] = "/Volumes/Container";
+    // Use bin_file_path as the root volume name
+    char container_root[MAX_PATH_LEN];
+    snprintf(container_root, sizeof(container_root), "/Volumes/%s", bin_file_path);
 
     char shared_mount_point[MAX_PATH_LEN];
     snprintf(shared_mount_point, sizeof(shared_mount_point), "%s/shared", container_root);
@@ -1724,8 +1774,9 @@ void ocreate_isolated_environment(FILE *bin_file, const char *bin_file_path) {
         exit(1);
     }
 
-    printf("\n=== Container Terminal ===\n");
+    printf("\n=== Container %s Terminal ===\n", bin_file_path);
     printf("Enter commands (type 'exit' to quit, help for help):\n");
+    printf("If you just ran the container ignore the first log file error");
 
     if (config.start_config[0] != '\0') {
         char start_config_path[MAX_PATH_LEN];
@@ -1820,15 +1871,39 @@ void ocreate_isolated_environment(FILE *bin_file, const char *bin_file_path) {
                     printf("  autoscale: Start automatic resource scaling\n");
                     printf("  status: Print current resource usage\n");
                     printf("  help: Print this help message\n");
+                    printf(" stop: Stops the container and saves its state\n");
+                } else if (strcmp(command, "stop") == 0) {
+                    printf("Stopping container...\n");
+
+                    // Save the container state
+                    char state_file_path[MAX_PATH_LEN];
+                    snprintf(state_file_path, sizeof(state_file_path), "%s/%s", container_root, bin_file_path);
+                    FILE *state_file = fopen(state_file_path, "wb");
+                    if (state_file == NULL) {
+                        perror("Error creating container state file");
+                    } else {
+                        // Save the container configuration
+                        fwrite(&config, sizeof(ContainerConfig), 1, state_file);
+
+                        // Save the environment variables
+                        fwrite(&container_state, sizeof(ContainerState), 1, state_file);
+                        fclose(state_file);
+                        printf("Container state saved to %s\n", state_file_path);
+                    }
+
+                    goto stop_loop;
                 } else {
                     execute_command(command);
                 }
 
                 printf("\n");
                 add_to_history(command);
-                FILE *log_file = fopen("/Volumes/Container/log.txt", "a");
+                char log_file_path[MAX_PATH_LEN];
+                snprintf(log_file_path, sizeof(log_file_path), "%s/log.txt", container_root);
+                FILE *log_file = fopen(log_file_path, "a");
                 if (log_file == NULL) {
                     perror("Failed to open log file");
+                    printf("If you just ran the container ignore this");
                 } else {
                     fprintf(log_file, "\nCommand History:\n");
                     for (int i = 0; i < command_index; i++) {
@@ -1865,6 +1940,18 @@ exit_loop:
         free(container_state.environment_variables[i]);
     }
     free(container_state.environment_variables);
+    exit(0);
+
+stop_loop:
+    set_terminal_canonical_mode();
+    printf("Container stopped.\n");
+    pthread_cancel(logger);
+    pthread_join(logger, NULL);
+
+    // Preserve the environment variables
+    for (int i = 0; i < container_state.num_env_vars; i++) {
+        setenv(container_state.environment_variables[i], NULL, 1);
+    }
 }
 
 size_t write_data(void *ptr, size_t size, size_t nmemb, FILE *stream) {
@@ -2227,13 +2314,15 @@ void deploy_container(const char *config_file, int deploy_port) {
 
 }
 
-void detach_container_images() {
-    printf("Detaching all Containes\n");
-    int result = system("hdiutil detach -force /Volumes/Container*");
+void detach_container_images(const char *volume_name) {
+    printf("Detaching %s Containers\n", volume_name);
+    char command[MAX_PATH_LEN];
+    snprintf(command, sizeof(command), "hdiutil detach -force /Volumes/%s", volume_name);
+    int result = system(command);
     if (result == 0) {
-        printf("All Container disk images detached successfully.\n");
+        printf("Container disk image detached.\n");
     } else {
-        fprintf(stderr, "Failed to detach some or all 'Container' disk images.\n");
+        fprintf(stderr, "Failed to detach Container disk image.\n");
     }
 }
 
@@ -2517,6 +2606,161 @@ void convert_to_oci(const char *osxiec_file, const char *output_dir, const char 
     printf("OCI container structure created in %s\n", output_dir);
 }
 
+char* find_latest_bin_file(const char *volume_name) {
+    DIR *dir;
+    struct dirent *entry;
+    char *latest_file_path = NULL;
+    time_t latest_timestamp = 0;
+    char search_directory[MAX_PATH_LEN];
+
+    // Format the search directory path
+    snprintf(search_directory, sizeof(search_directory), "/Volumes/%s", volume_name);
+
+    if ((dir = opendir(search_directory)) == NULL) {
+        perror("Unable to open directory");
+        return NULL;
+    }
+
+    while ((entry = readdir(dir)) != NULL) {
+        // Check if the file ends with ".bin"
+        if (strstr(entry->d_name, ".bin") != NULL) {
+            // Extract Unix timestamp from the beginning of the filename
+            time_t timestamp = atol(entry->d_name);
+
+            if (timestamp > latest_timestamp) {
+                latest_timestamp = timestamp;
+
+                // Free the previous path and allocate for the new one
+                free(latest_file_path);
+                latest_file_path = malloc(MAX_PATH_LEN);
+                snprintf(latest_file_path, MAX_PATH_LEN, "%s/%s", search_directory, entry->d_name);
+            }
+        }
+    }
+    closedir(dir);
+
+    return latest_file_path;
+}
+
+int copy_file(const char *source, const char *destination_folder, const char *new_file_name) {
+    // Construct the full path for the destination file
+    char destination[MAX_PATH_LEN];
+    snprintf(destination, sizeof(destination), "%s/%s", destination_folder, new_file_name);
+
+    FILE *src = fopen(source, "rb");
+    if (src == NULL) {
+        perror("Error opening source file");
+        return -1;
+    }
+
+    FILE *dst = fopen(destination, "wb");
+    if (dst == NULL) {
+        perror("Error opening destination file");
+        fclose(src);
+        return -1;
+    }
+
+    char buffer[BUFSIZ];
+    size_t n;
+    while ((n = fread(buffer, 1, sizeof(buffer), src)) > 0) {
+        if (fwrite(buffer, 1, n, dst) != n) {
+            perror("Error writing to destination file");
+            fclose(src);
+            fclose(dst);
+            return -1;
+        }
+    }
+
+    fclose(src);
+    fclose(dst);
+    return 0;
+}
+
+size_t write_callback(void *contents, size_t size, size_t nmemb, void *userp) {
+    size_t total_size = size * nmemb;
+    char **response_ptr = (char **)userp;
+
+    // Allocate or reallocate memory for the response
+    char *temp = realloc(*response_ptr, total_size + ( *response_ptr ? strlen(*response_ptr) : 0 ) + 1);
+    if (temp == NULL) {
+        fprintf(stderr, "Failed to allocate memory.\n");
+        return 0; // Abort the transfer
+    }
+    *response_ptr = temp;
+
+    // Append new data to the response buffer
+    if (*response_ptr) {
+        memcpy(*response_ptr + ( *response_ptr ? strlen(*response_ptr) : 0 ), contents, total_size);
+        (*response_ptr)[total_size + ( *response_ptr ? strlen(*response_ptr) : 0 )] = '\0'; // Null-terminate
+    }
+
+    return total_size;
+}
+
+
+char* fetch_latest_version(void) {
+    CURL *curl;
+    CURLcode res;
+    char *latest_version = NULL;
+
+    curl = curl_easy_init();
+    if(curl) {
+        struct curl_slist *headers = NULL;
+        headers = curl_slist_append(headers, "User-Agent: osxiec-update-checker");
+
+        curl_easy_setopt(curl, CURLOPT_URL, "https://api.github.com/repos/Okerew/osxiec/releases/latest");
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+
+        char *response = NULL;
+
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+
+        res = curl_easy_perform(curl);
+
+        if(res == CURLE_OK) {
+            if (response) {
+                struct json_object *parsed_json = json_tokener_parse(response);
+                if (parsed_json == NULL) {
+                    fprintf(stderr, "Failed to parse JSON.\n");
+                } else {
+                    struct json_object *tag_name;
+                    if (json_object_object_get_ex(parsed_json, "tag_name", &tag_name)) {
+                        const char *version = json_object_get_string(tag_name);
+                        latest_version = strdup(version);
+                    } else {
+                        fprintf(stderr, "JSON does not contain 'tag_name' field.\n");
+                    }
+
+                    json_object_put(parsed_json);
+                }
+            } else {
+                fprintf(stderr, "No response data received.\n");
+            }
+        } else {
+            fprintf(stderr, "CURL request failed: %s\n", curl_easy_strerror(res));
+        }
+
+        curl_easy_cleanup(curl);
+        curl_slist_free_all(headers);
+        free(response);
+    } else {
+        fprintf(stderr, "Failed to initialize CURL.\n");
+    }
+
+    return latest_version;
+}
+
+// Add this function to compare version strings
+int compare_versions(const char* v1, const char* v2) {
+    int a, b, c, d, e, f;
+    sscanf(v1, "%d.%d.%d", &a, &b, &c);
+    sscanf(v2, "%d.%d.%d", &d, &e, &f);
+    if (a != d) return a - d;
+    if (b != e) return b - e;
+    return c - f;
+}
+
 int main(int argc, char *argv[]) {
     PluginManager plugin_manager;
     plugin_manager_init(&plugin_manager);
@@ -2602,29 +2846,6 @@ int main(int argc, char *argv[]) {
         const char *container_config_file = (argc > 6) ? argv[6] : NULL;
         containerize_directory_with_bin_file(argv[2], argv[3], argv[4], start_config_file, container_config_file);
         printf("Directory contents containerized into '%s'.\n", argv[4]);
-    } else if (strcmp(argv[1], "-execute") == 0) {
-        if (argc < 3) {
-            fprintf(stderr, "Usage for execute: %s -execute <bin_file> [-port <port>]\n", argv[0]);
-            return EXIT_FAILURE;
-        }
-
-        // Parse port if provided
-        for (int i = 3; i < argc; i++) {
-            if (strcmp(argv[i], "-port") == 0 && i + 1 < argc) {
-                port = atoi(argv[i + 1]);
-                break;
-            }
-        }
-
-        FILE *bin_file = fopen(argv[2], "rb");
-        if (bin_file == NULL) {
-            perror("Error opening binary file");
-            return EXIT_FAILURE;
-        }
-
-        ContainerNetwork dummy_network = {0};
-        create_isolated_environment(bin_file, argv[2], &dummy_network);
-        fclose(bin_file);
     } else if (strcmp(argv[1], "-oexec") == 0) {
         if (argc < 3) {
             fprintf(stderr, "Usage for execute: %s -execute <bin_file> [-port <port>]\n", argv[0]);
@@ -2690,8 +2911,107 @@ int main(int argc, char *argv[]) {
         }
         create_isolated_environment(bin_file, argv[2], &network);
         fclose(bin_file);
+    } else if (strcmp(argv[1], "-start") == 0) {
+        if (argc < 4) {
+            fprintf(stderr, "Usage: %s -start <volume_name> <network_name> [-port <port>]\n", argv[0]);
+            return EXIT_FAILURE;
+        }
+
+        for (int i = 4; i < argc; i++) {
+            if (strcmp(argv[i], "-port") == 0 && i + 1 < argc) {
+                port = atoi(argv[i + 1]);
+                break;
+            }
+        }
+
+        // Load network configuration
+        ContainerNetwork network = load_container_network(argv[3]);
+
+        if (network.vlan_id == 0) {
+            fprintf(stderr, "Failed to load network configuration for %s\n", argv[3]);
+            return EXIT_FAILURE;
+        }
+
+        // Find the latest binary file in the specified volume
+        const char *volume_name = argv[2];
+        char *latest_bin_file_path = find_latest_bin_file(volume_name);
+
+        if (latest_bin_file_path == NULL) {
+            fprintf(stderr, "No valid .bin file found for volume %s\n", volume_name);
+            return EXIT_FAILURE;
+        }
+
+        // Copy the latest file to the root of the volume with just the volume name
+        char dest_folder[MAX_PATH_LEN];
+        snprintf(dest_folder, sizeof(dest_folder), "/Volumes/%s", volume_name);
+
+        if (copy_file(latest_bin_file_path, dest_folder, volume_name) != 0) {
+            fprintf(stderr, "Failed to copy binary file to volume root\n");
+            free(latest_bin_file_path);
+            return EXIT_FAILURE;
+        }
+
+        // Open the copied binary file
+        char full_dest_path[MAX_PATH_LEN];
+        snprintf(full_dest_path, sizeof(full_dest_path), "%s/%s", dest_folder, volume_name);
+
+        printf("Opening binary file: %s\n", full_dest_path);
+        FILE *bin_file = fopen(full_dest_path, "rb");
+        if (bin_file == NULL) {
+            perror("Error opening binary file");
+            fprintf(stderr, "Failed to open: %s\n", full_dest_path);
+            free(latest_bin_file_path);
+            return EXIT_FAILURE;
+        }
+
+        create_isolated_environment(bin_file, volume_name, &network);
+
+        fclose(bin_file);
+        free(latest_bin_file_path);
+    } else if (strcmp(argv[1], "-ostart") == 0) {
+        if (argc < 2) {
+            fprintf(stderr, "Usage: %s -ostart <volume_name>\n", argv[0]);
+            return EXIT_FAILURE;
+        }
+
+        // Find the latest binary file in the specified volume
+        const char *volume_name = argv[2];
+        char *latest_bin_file_path = find_latest_bin_file(volume_name);
+
+        if (latest_bin_file_path == NULL) {
+            fprintf(stderr, "No valid .bin file found for volume %s\n", volume_name);
+            return EXIT_FAILURE;
+        }
+
+        // Copy the latest file to the root of the volume with just the volume name
+        char dest_folder[MAX_PATH_LEN];
+        snprintf(dest_folder, sizeof(dest_folder), "/Volumes/%s", volume_name);
+
+        if (copy_file(latest_bin_file_path, dest_folder, volume_name) != 0) {
+            fprintf(stderr, "Failed to copy binary file to volume root\n");
+            free(latest_bin_file_path);
+            return EXIT_FAILURE;
+        }
+
+        // Open the copied binary file
+        char full_dest_path[MAX_PATH_LEN];
+        snprintf(full_dest_path, sizeof(full_dest_path), "%s/%s", dest_folder, volume_name);
+
+        printf("Opening binary file: %s\n", full_dest_path);
+        FILE *bin_file = fopen(full_dest_path, "rb");
+        if (bin_file == NULL) {
+            perror("Error opening binary file");
+            fprintf(stderr, "Failed to open: %s\n", full_dest_path);
+            free(latest_bin_file_path);
+            return EXIT_FAILURE;
+        }
+
+        ocreate_isolated_environment(bin_file, volume_name);
+
+        fclose(bin_file);
+        free(latest_bin_file_path);
     } else if (strcmp(argv[1], "--version") == 0) {
-        printf("Osxiec version 0.69\n");
+        printf("Osxiec version %s\n", VERSION);
     } else if (strcmp(argv[1], "-pull") == 0) {
         if (argc != 3) {
             printf("Usage: %s -pull <file_name>\n", argv[0]);
@@ -2758,11 +3078,11 @@ int main(int argc, char *argv[]) {
 
         system(command);
     } else if (strcmp(argv[1], "-detach") == 0) {
-        if (argc > 2) {
-            fprintf(stderr, "Usage: %s -detach\n", argv[0]);
+        if (argc != 3) {
+            fprintf(stderr, "Usage: %s -detach <volume_name>\n", argv[0]);
             return EXIT_FAILURE;
         }
-        detach_container_images();
+        detach_container_images(argv[2]);
     } else if (strcmp(argv[1], "-extract") == 0) {
         if (argc != 4) {
             fprintf(stderr, "Usage: %s -extract <container_file> <output_directory>\n", argv[0]);
@@ -2775,10 +3095,12 @@ int main(int argc, char *argv[]) {
         printf("Contains a directory into a container file\n");
         printf(" -craft <directory_path> <input_bin_file> <output_file> <path_to_start_config_file> <path_to_container_config_file>\n");
         printf("Crafts a container file from a directory and a bin file\n");
-        printf("  -execute <directory_path> [-port <port>]\n");
-        printf("Executes a container file\n");
         printf(" -oexec <container_file>\n");
         printf("Executes a container file in offline mode\n");
+        printf(" -start <container_file> <network_name> [-port <port>]\n");
+        printf("Starts a stopped container");
+        printf(" -ostart <container_file> <network_name> [-port <port>]\n");
+        printf("Starts a stopped container in offline mode");
         printf("  -network <create|remove> <name> [vlan_id>\n");
         printf("Manages the vlan network\n");
         printf("  -run <container_file> <network_name> [-port <port>]\n");
@@ -2809,6 +3131,23 @@ int main(int argc, char *argv[]) {
         printf("Prints the version of osxiec\n");
         printf("  -help\n");
         printf("Prints this help message\n");
+        printf("  -check-for-update\n");
+        printf("Checks for updates\n");
+    } else if (strcmp(argv[1], "-check-for-update") == 0) {
+        char* latest_version = fetch_latest_version();
+        if (latest_version) {
+            int comparison = compare_versions(VERSION, latest_version);
+            if (comparison < 0) {
+                printf("An update is available. Latest version: %s\n", latest_version);
+                printf("Your current version: %s\n", VERSION);
+                printf("Please visit https://github.com/Okerew/osxiec/releases/latest to update.\n");
+            } else if (comparison == 0) {
+                printf("You are running the latest version (%s).\n", VERSION);
+            }
+            free(latest_version);
+        } else {
+            printf("Failed to check for updates. Please check your internet connection.\n");
+        }
     } else {
         fprintf(stderr, "Unknown command: %s\n", argv[1]);
         return EXIT_FAILURE;
