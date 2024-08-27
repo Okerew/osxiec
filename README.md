@@ -47,14 +47,14 @@ brew install cmake
 
 Arm architecture
 ```sh
-curl -L -o osxiec_cli.tar.gz https://github.com/Okerew/osxiec/releases/download/%s/osxiec_cli.tar.gz && tar -xvzf osxiec_cli.tar.gz && sudo sh install.sh
+curl -L -o osxiec_cli.tar.gz https://github.com/Okerew/osxiec/releases/download/%s/osxiec_cli.tar.gz && tar -xvzf osxiec_cli.tar.gz && cd osxiec_cli && sudo sh install.sh
 ```
 replace %s with the latest version
 ______
 
 86_64 architecture
 ```sh
-curl -L -o osxiec_cli_86_64.tar.gz https://github.com/Okerew/osxiec/releases/download/%s/osxiec_cli_86_64.tar.gz && tar -xvzf osxiec_cli_86_64.tar.gz && sudo sh install.sh
+curl -L -o osxiec_cli_86_64.tar.gz https://github.com/Okerew/osxiec/releases/download/%s/osxiec_cli_86_64.tar.gz && tar -xvzf osxiec_cli_86_64.tar.gz && cd osxiec_cli_86_64 && sudo sh install.sh
 ```
 replace %s with the latest version
 ____
