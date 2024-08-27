@@ -37,7 +37,8 @@
 #define MAX_MEMORY_LIMIT 2147483648 // 2 GB max memory limit
 #define MAX_HISTORY_LEN 100
 #define MAX_LINE_LEN 1024
-#define VERSION "0.7"
+#define VERSION "v0.71"
+#define OSXIEC_ARCHITECTURE "arm64"
 
 int port = PORT;
 
@@ -70,6 +71,7 @@ typedef struct {
     int vlan_id;
     int num_containers;
     char container_names[MAX_CLIENTS][MAX_PATH_LEN];
+    char container_ips[MAX_CLIENTS][16];
 } ContainerNetwork;
 
 int debug_mode = DEBUG_NONE;
@@ -278,7 +280,7 @@ int is_subpath(const char *path, const char *base) {
 }
 
 
-void execute_command(const char *command) {
+void execute_command(const char *command, const char *container_root) {
     if (command == NULL || strlen(command) == 0) {
         fprintf(stderr, "Error: Empty command\n");
         return;
@@ -302,7 +304,6 @@ void execute_command(const char *command) {
     // Update current directory if it's a cd command
     if (strncmp(command, "cd ", 3) == 0) {
         const char *new_dir = command + 3;
-        const char container_root[] = "/Volumes/Container";
         const char shared_folder_path[] = "/Volumes/SharedContainer";
 
         char current_path[PATH_MAX];
@@ -381,7 +382,7 @@ void execute_command(const char *command) {
     free(command_copy);
 }
 
-void execute_start_config(const char *config_file) {
+void execute_start_config(const char *config_file, const char *container_root) {
     FILE *file = fopen(config_file, "r");
     if (file == NULL) {
         perror("Error opening start configuration file");
@@ -399,7 +400,7 @@ void execute_start_config(const char *config_file) {
         }
 
         printf("Executing start command: %s\n", line);
-        execute_command(line);
+        execute_command(line, container_root);
     }
 
     fclose(file);
@@ -601,7 +602,7 @@ void containerize_directory(const char *dir_path, const char *output_file, const
         .memory_soft_limit = 384 * 1024 * 1024,
         .memory_hard_limit = 512 * 1024 * 1024,
         .cpu_priority = 20,
-        .network_mode = "host",
+        .network_mode = "bridge",
         .container_uid = 1000,
         .container_gid = 1000,
         .start_config = ""
@@ -683,7 +684,7 @@ void containerize_directory_with_bin_file(const char *dir_path, const char *inpu
         .memory_soft_limit = 384 * 1024 * 1024,
         .memory_hard_limit = 512 * 1024 * 1024,
         .cpu_priority = 20,
-        .network_mode = "host",
+        .network_mode = "bridge",
         .container_uid = 1000,
         .container_gid = 1000,
         .start_config = ""
@@ -838,6 +839,13 @@ ContainerNetwork load_container_network(const char *name) {
         if (sscanf(line, "vlan_id=%d", &network.vlan_id) == 1) {
             continue;
         }
+        if (sscanf(line, "container_name=%s", network.container_names[network.num_containers]) == 1) {
+            network.num_containers++;
+            continue;
+        }
+        if (sscanf(line, "container_ip=%s", network.container_ips[network.num_containers - 1]) == 1) {
+            continue;
+        }
     }
 
     fclose(file);
@@ -881,9 +889,30 @@ void remove_container_network(const char *name) {
 void add_container_to_network(ContainerNetwork *network, const char *container_name) {
     if (network->num_containers < MAX_CLIENTS) {
         strncpy(network->container_names[network->num_containers], container_name, MAX_PATH_LEN - 1);
+
+        // Dynamically assign IP address based on the number of containers
+        char container_ip[16];
+        snprintf(container_ip, sizeof(container_ip), "192.168.%d.%d", network->vlan_id, network->num_containers + 2);
+        strncpy(network->container_ips[network->num_containers], container_ip, 15);
+
         network->num_containers++;
+
+        // Save the updated network configuration to a file
+        char filename[MAX_PATH_LEN];
+        snprintf(filename, sizeof(filename), "/tmp/network_%s.conf", network->name);
+
+        FILE *file = fopen(filename, "a");
+        if (file == NULL) {
+            perror("Failed to save network configuration");
+            return;
+        }
+
+        fprintf(file, "container_name=%s\n", container_name);
+        fprintf(file, "container_ip=%s\n", container_ip);
+        fclose(file);
     }
 }
+
 
 char *get_ip_address() {
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
@@ -975,20 +1004,23 @@ void setup_pf_rules(ContainerNetwork *network) {
     free(ip_address);
 }
 
-
 void setup_network_isolation(ContainerConfig *config, ContainerNetwork *network) {
     if (strcmp(config->network_mode, "bridge") == 0) {
         config->vlan_id = network->vlan_id;
+
+        // Dynamically assign IP address based on the number of containers
+        char container_ip[16];
+        snprintf(container_ip, sizeof(container_ip), "192.168.%d.%d", network->vlan_id, network->num_containers + 2);
         add_container_to_network(network, config->name);
 
-        printf("Setting up bridge network. Container %s on VLAN %d\n", config->name, config->vlan_id);
+        printf("Setting up bridge network. Container %s on VLAN %d with IP %s\n", config->name, config->vlan_id, container_ip);
 
         char vlan_cmd[256];
         snprintf(vlan_cmd, sizeof(vlan_cmd), "ifconfig vlan%d create vlan %d vlandev en0",
                  config->vlan_id, config->vlan_id);
         system(vlan_cmd);
 
-        snprintf(vlan_cmd, sizeof(vlan_cmd), "ifconfig vlan%d up", config->vlan_id);
+        snprintf(vlan_cmd, sizeof(vlan_cmd), "ifconfig vlan%d inet %s/24 up", config->vlan_id, container_ip);
         system(vlan_cmd);
     } else if (strcmp(config->network_mode, "host") == 0) {
         printf("Using host network mode\n");
@@ -998,6 +1030,7 @@ void setup_network_isolation(ContainerConfig *config, ContainerNetwork *network)
         printf("Unsupported network mode\n");
     }
 }
+
 
 void enable_container_communication(ContainerNetwork *network) {
     char pf_rule[256];
@@ -1018,7 +1051,7 @@ void enable_container_communication(ContainerNetwork *network) {
     system("pfctl -f /etc/pf.conf");
 }
 
-void handle_client(int client_socket) {
+void handle_client(int client_socket, const char *container_root) {
     char command[MAX_COMMAND_LEN];
     ssize_t bytes_received;
 
@@ -1030,7 +1063,7 @@ void handle_client(int client_socket) {
         }
 
         // Execute the command
-        execute_command(command);
+        execute_command(command, container_root);
 
         // Send a response back to the client
         const char *response = "Command executed.\n";
@@ -1040,7 +1073,7 @@ void handle_client(int client_socket) {
     close(client_socket);
 }
 
-void start_network_listener() {
+void start_network_listener(const char *container_root) {
     int server_fd, client_socket;
     struct sockaddr_in address;
     int opt = 1;
@@ -1082,7 +1115,7 @@ void start_network_listener() {
         }
 
         printf("New client connected\n");
-        handle_client(client_socket);
+        handle_client(client_socket, container_root);
     }
 }
 
@@ -1350,8 +1383,24 @@ void create_isolated_environment(FILE *bin_file, const char *bin_file_path, Cont
     char disk_image_path[MAX_PATH_LEN];
     snprintf(disk_image_path, sizeof(disk_image_path), "/tmp/container_disk_%d.dmg", getpid());
 
+    // Assign the volume name as the bin_file_path
     char create_disk_command[MAX_COMMAND_LEN];
-    snprintf(create_disk_command, sizeof(create_disk_command), "hdiutil create -size 1g -fs HFS+ -volname \"%s\" %s", bin_file_path, disk_image_path);
+    struct stat st;
+    if (stat(bin_file_path, &st) == -1) {
+        perror("stat");
+    }
+
+    // Get the size of the file in bytes
+    off_t file_size = st.st_size;
+
+    // Convert the size to gigabytes and add 1 GB
+    double size_in_gb = (double)file_size / (1024 * 1024 * 1024) + 1.0;
+
+    // Format the size to two decimal places
+    snprintf(create_disk_command, sizeof(create_disk_command),
+             "hdiutil create -size %.2fg -fs HFS+ -volname \"%s\" %s",
+             size_in_gb, bin_file_path, disk_image_path);
+
     system(create_disk_command);
 
     chmod(disk_image_path, 0644);  // rw-r--r--
@@ -1469,7 +1518,7 @@ void create_isolated_environment(FILE *bin_file, const char *bin_file_path, Cont
     if (config.start_config[0] != '\0') {
         char start_config_path[MAX_PATH_LEN];
         snprintf(start_config_path, sizeof(start_config_path), "%s/%s", container_root, config.start_config);
-        execute_start_config(start_config_path);
+        execute_start_config(start_config_path, container_root);
     }
 
     char command[MAX_COMMAND_LEN];
@@ -1585,7 +1634,7 @@ void create_isolated_environment(FILE *bin_file, const char *bin_file_path, Cont
 
                     goto stop_loop;
                 } else {
-                    execute_command(command);
+                    execute_command(command, container_root);
                 }
 
                 printf("\n");
@@ -1672,7 +1721,22 @@ void ocreate_isolated_environment(FILE *bin_file, const char *bin_file_path) {
 
     // Assign the volume name as the bin_file_path
     char create_disk_command[MAX_COMMAND_LEN];
-    snprintf(create_disk_command, sizeof(create_disk_command), "hdiutil create -size 1g -fs HFS+ -volname \"%s\" %s", bin_file_path, disk_image_path);
+    struct stat st;
+    if (stat(bin_file_path, &st) == -1) {
+        perror("stat");
+    }
+
+    // Get the size of the file in bytes
+    off_t file_size = st.st_size;
+
+    // Convert the size to gigabytes and add 1 GB
+    double size_in_gb = (double)file_size / (1024 * 1024 * 1024) + 1.0;
+
+    // Format the size to two decimal places
+    snprintf(create_disk_command, sizeof(create_disk_command),
+             "hdiutil create -size %.2fg -fs HFS+ -volname \"%s\" %s",
+             size_in_gb, bin_file_path, disk_image_path);
+
     system(create_disk_command);
 
     chmod(disk_image_path, 0644);
@@ -1781,7 +1845,7 @@ void ocreate_isolated_environment(FILE *bin_file, const char *bin_file_path) {
     if (config.start_config[0] != '\0') {
         char start_config_path[MAX_PATH_LEN];
         snprintf(start_config_path, sizeof(start_config_path), "%s/%s", container_root, config.start_config);
-        execute_start_config(start_config_path);
+        execute_start_config(start_config_path, container_root);
     }
 
     char command[MAX_COMMAND_LEN];
@@ -1893,7 +1957,7 @@ void ocreate_isolated_environment(FILE *bin_file, const char *bin_file_path) {
 
                     goto stop_loop;
                 } else {
-                    execute_command(command);
+                    execute_command(command, container_root);
                 }
 
                 printf("\n");
@@ -2751,7 +2815,6 @@ char* fetch_latest_version(void) {
     return latest_version;
 }
 
-// Add this function to compare version strings
 int compare_versions(const char* v1, const char* v2) {
     int a, b, c, d, e, f;
     sscanf(v1, "%d.%d.%d", &a, &b, &c);
@@ -3010,8 +3073,6 @@ int main(int argc, char *argv[]) {
 
         fclose(bin_file);
         free(latest_bin_file_path);
-    } else if (strcmp(argv[1], "--version") == 0) {
-        printf("Osxiec version %s\n", VERSION);
     } else if (strcmp(argv[1], "-pull") == 0) {
         if (argc != 3) {
             printf("Usage: %s -pull <file_name>\n", argv[0]);
@@ -3127,13 +3188,13 @@ int main(int argc, char *argv[]) {
         printf("Detaches container from /Volumes\n");
         printf("  -extract <container_file> <output_directory>\n");
         printf("Extracts a container file\n");
-        printf("  --version\n");
-        printf("Prints the version of osxiec\n");
         printf("  -help\n");
         printf("Prints this help message\n");
-        printf("  -check-for-update\n");
-        printf("Checks for updates\n");
-    } else if (strcmp(argv[1], "-check-for-update") == 0) {
+        printf("  --version\n");
+        printf("Checks for updates and the current version\n");
+        printf("  -update\n");
+        printf("Checks for updates and updates the current version\n");
+    } else if (strcmp(argv[1], "--version") == 0) {
         char* latest_version = fetch_latest_version();
         if (latest_version) {
             int comparison = compare_versions(VERSION, latest_version);
@@ -3147,6 +3208,87 @@ int main(int argc, char *argv[]) {
             free(latest_version);
         } else {
             printf("Failed to check for updates. Please check your internet connection.\n");
+            printf("Your current version: %s\n", VERSION);
+        }
+    } else if (strcmp(argv[1], "-update") == 0) {
+        char* latest_version = fetch_latest_version();
+        if (latest_version) {
+            int comparison = compare_versions(VERSION, latest_version);
+            if (comparison < 0) {
+                printf("An update is available. Latest version: %s\n", latest_version);
+                printf("Your current version: %s\n", VERSION);
+                if (strcmp(OSXIEC_ARCHITECTURE, "arm64") == 0) {
+                    char update_command[MAX_COMMAND_LEN];
+                    sprintf(update_command, "curl -L -o osxiec_cli.tar.gz https://github.com/Okerew/osxiec/releases/download/%s/osxiec_cli.tar.gz", latest_version);
+                    system(update_command);
+                    system("tar -xvzf osxiec_cli.tar.gz");
+                    const char *path = "osxiec_cli";
+
+                    if (chdir(path) != 0) {
+                        perror("chdir() to 'osxiec_cli' failed");
+                        return 1;
+                    }
+
+                    system("sudo sh install.sh");
+                }
+                if (strcmp(OSXIEC_ARCHITECTURE, "86_64") == 0) {
+                    char update_command[MAX_COMMAND_LEN];
+                    sprintf(update_command, "curl -L -o osxiec_cli_86_64.tar.gz https://github.com/Okerew/osxiec/releases/download/%s/osxiec_cli.tar.gz", latest_version);
+                    system(update_command);
+                    system("tar -xvzf osxiec_cli_86_64.tar.gz");
+                    const char *path = "osxiec_cli_86_64";
+
+                    if (chdir(path) != 0) {
+                        perror("chdir() to 'osxiec_cli' failed");
+                        return 1;
+                    }
+
+                    system("sudo sh install.sh");
+                }
+                else {
+                    printf("There was some error while updating. Please visit https://github.com/Okerew/osxiec/releases/latest to update.\n");
+                }
+            } else if (comparison == 0) {
+                printf("You are running the latest version (%s).\n", VERSION);
+            }
+            free(latest_version);
+        } else {
+            printf("Failed to check for updates. Please check your internet connection.\n");
+            printf("Your current version: %s\n", VERSION);
+        }
+    } else if (strcmp(argv[1], "-api") == 0) {
+        if (strcmp(argv[2], "execute_command") == 0) {
+            execute_command(argv[3], argv[4]);
+        }
+        else if(strcmp(argv[2], "copy_file") == 0) {
+            copy_file(argv[3], argv[4], argv[5]);
+        }
+        else if(strcmp(argv[2], "execute_script_file") == 0) {
+            execute_script_file(argv[3]);
+        }
+        else if (strcmp(argv[2], "get_ip_address") == 0) {
+            char* ip_address = get_ip_address();
+            printf("%s\n", ip_address);
+        }
+        else if (strcmp(argv[2], "isbase64") == 0) {
+            int value_is_base64 = is_base64(argv[3]);
+            printf("%d\n", value_is_base64);
+        }
+        else if (strcmp(argv[2], "find_latest_bin_file") == 0) {
+            char* latest_bin_file = find_latest_bin_file(argv[3]);
+            printf("%s\n", latest_bin_file);
+        }
+        else if (strcmp(argv[2], "create_directories") == 0) {
+            create_directories(argv[3]);
+        }
+        else if (strcmp(argv[2], "execute_start_config") == 0) {
+            execute_start_config(argv[3], argv[4]);
+        }
+        else if (strcmp(argv[2], "start_network_listener") == 0) {
+            start_network_listener(argv[1]);
+        }
+        else {
+            printf("This futures is not accessible in the api\n");
         }
     } else {
         fprintf(stderr, "Unknown command: %s\n", argv[1]);
