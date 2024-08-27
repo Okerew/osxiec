@@ -28,6 +28,10 @@ brew install readline
 ```sh
 brew install json-c@0.17
 ```
+
+**Xcode**
+https://apps.apple.com/us/app/xcode/id497799835?mt=12
+
 ### Build Dependencies
 **Ninja for building**
 ```sh
@@ -37,10 +41,30 @@ brew install ninja
 ``` sh
 brew install cmake
 ```
-**Xcode**
-https://apps.apple.com/us/app/xcode/id497799835?mt=12
 ## Installation
 
+**Quick way with command line**
+
+Arm architecture
+```sh
+curl -L -o osxiec_cli.tar.gz https://github.com/Okerew/osxiec/releases/download/%s/osxiec_cli.tar.gz && tar -xvzf osxiec_cli.tar.gz && sudo sh install.sh
+```
+replace %s with the latest version
+______
+
+86_64 architecture
+```sh
+curl -L -o osxiec_cli_86_64.tar.gz https://github.com/Okerew/osxiec/releases/download/%s/osxiec_cli_86_64.tar.gz && tar -xvzf osxiec_cli_86_64.tar.gz && sudo sh install.sh
+```
+replace %s with the latest version
+____
+Gui
+```sh
+curl -L -o osxiec_gui.tar.gz https://github.com/Okerew/osxiec/releases/download/%s/osxiec_gui.tar.gz && sudo cp osxiec_gui.tar.gz /Applications 
+```
+replace %s with the latest version
+
+______
 1. **Download the Release**:
    Download the `osxiec_cli.tar.gz` and `osxiec_gui.tar.gz` if you want a gui app file from the releases section.
 2. **Extract the Archive**:
@@ -83,7 +107,7 @@ sudo osxiec -run {some_name.bin} {network_name} -port {PORT_NUMBER}
 ```
 port argument is optional
 
-**Version** checks the current version
+**Version** checks the current version, updates
 ```sh
 osxiec --version
 ```
@@ -153,11 +177,6 @@ osxiec -convert-to-oci {bin_file_path} {output_path} {arch} {author}
 sudo osxiec -craft {directory_path} {bin_input_file} {output_file} {start_config_file} {container_config_file}
 ```
 
-**Check for update** checks for update
-```sh
-osxiec -check-for-update
-```
-
 **Start** starts a container a stopped container
 ```sh
 osxiec -start {volume_name} {network} -port {PORT_NUMBER} 
@@ -169,6 +188,15 @@ port is optional
 osxiec -ostart {volume_name} 
 ```
 
+**Api** an api that exposes some more functions of the cli
+```sh
+osxiec -api {argument}
+```
+
+**Update** checks for updates and updates
+```sh
+sudo osxiec -update
+```
 ## Creating a container
 Make sure to include any dependencies or executables you can obtain these by searching for where a dependency or executable is located and copying it along with it's dependencies.
 
