@@ -18,13 +18,15 @@
 #include <libgen.h>
 #include "/usr/local/Cellar/json-c/0.17/include/json-c/json.h"
 #include <termios.h>
+#include <mach-o/dyld.h>
 
+#define OSXIEC_ARCHITECTURE "86_64"
 #define MAX_COMMAND_LEN 1024
 #define MAX_PATH_LEN 256
 #define MAX_FILE_SIZE 1024*1024*1024 // 1 GB
 #define MAX_FILES 2147483648
 #define PORT 3000
-#define MAX_CLIENTS 5
+#define MAX_CLIENTS 15
 #define DEBUG_NONE 0
 #define DEBUG_STEP 1
 #define DEBUG_BREAK 2
@@ -37,8 +39,7 @@
 #define MAX_MEMORY_LIMIT 2147483648 // 2 GB max memory limit
 #define MAX_HISTORY_LEN 100
 #define MAX_LINE_LEN 1024
-#define VERSION "v0.71"
-#define OSXIEC_ARCHITECTURE "86_64"
+#define VERSION "v0.72"
 
 int port = PORT;
 
@@ -1321,7 +1322,7 @@ void navigate_history(char *command, int *command_index, int *cursor_pos, int di
 
 volatile sig_atomic_t stop_thread = 0;
 
-void signal_handler(int signum) {
+void signal_handler() {
     stop_thread = 1;
 }
 
@@ -2816,12 +2817,83 @@ char* fetch_latest_version(void) {
 }
 
 int compare_versions(const char* v1, const char* v2) {
-    int a, b, c, d, e, f;
-    sscanf(v1, "%d.%d.%d", &a, &b, &c);
-    sscanf(v2, "%d.%d.%d", &d, &e, &f);
-    if (a != d) return a - d;
-    if (b != e) return b - e;
-    return c - f;
+    return strcmp(v1, v2) == 0 ? 0 : -1;
+}
+
+
+int add_plugin(const char* plugin_source) {
+    // Get the user's home directory
+    const char* home_dir = getenv("HOME");
+    if (home_dir == NULL) {
+        struct passwd* pwd = getpwuid(getuid());
+        if (pwd == NULL) {
+            fprintf(stderr, "Unable to determine home directory\n");
+            return EXIT_FAILURE;
+        }
+        home_dir = pwd->pw_dir;
+    }
+
+    // Define the plugin directory in the user's home
+    char plugin_dir[MAX_PATH_LEN];
+    snprintf(plugin_dir, sizeof(plugin_dir), "%s/.osxiec/plugins", home_dir);
+    char compile_command[1024];
+    char link_command[1024];
+    char plugin_name[256];
+    char* dot_pos = strrchr(plugin_source, '.');
+
+    if (dot_pos == NULL) {
+        fprintf(stderr, "Invalid plugin source file name\n");
+        return -1;
+    }
+
+    // Extract plugin name without extension
+    strncpy(plugin_name, plugin_source, dot_pos - plugin_source);
+    plugin_name[dot_pos - plugin_source] = '\0';
+
+    // Compile the plugin as an object file
+    snprintf(compile_command, sizeof(compile_command),
+             "gcc -c -fPIC -o %s.o %s", plugin_name, plugin_source);
+
+    if (system(compile_command) != 0) {
+        fprintf(stderr, "Failed to compile plugin\n");
+        return -1;
+    }
+
+    // Get the path of the current executable
+    char executable_path[PATH_MAX];
+    uint32_t size = sizeof(executable_path);
+    if (_NSGetExecutablePath(executable_path, &size) != 0) {
+        fprintf(stderr, "Failed to get executable path\n");
+        return -1;
+    }
+
+    // Link the plugin with the main executable
+    snprintf(link_command, sizeof(link_command),
+             "gcc -dynamiclib -o lib%s.dylib %s.o -undefined dynamic_lookup",
+             plugin_name, plugin_name);
+
+    if (system(link_command) != 0) {
+        fprintf(stderr, "Failed to create dynamic library from plugin\n");
+        return -1;
+    }
+
+    // Move the dynamic library to the plugin directory
+    char move_command[1024];
+    snprintf(move_command, sizeof(move_command),
+             "mv lib%s.dylib %s", plugin_name, plugin_dir);
+
+    if (system(move_command) != 0) {
+        fprintf(stderr, "Failed to move plugin to plugin directory\n");
+        return -1;
+    }
+
+    // Clean up the object file
+    remove(plugin_name);
+
+    printf("Plugin '%s' has been successfully compiled and moved to the plugin directory.\n", plugin_name);
+    printf("To use the plugin, you need to restart the program.\n");
+
+    return 0;
 }
 
 int main(int argc, char *argv[]) {
@@ -2904,6 +2976,10 @@ int main(int argc, char *argv[]) {
             fprintf(stderr, "This program must be run as root. Try using sudo.\n");
             return EXIT_FAILURE;
         }
+        if (geteuid() != 0) {
+            fprintf(stderr, "This program must be run as root. Try using sudo.\n");
+            return EXIT_FAILURE;
+        }
 
         const char *start_config_file = (argc > 5) ? argv[5] : NULL;
         const char *container_config_file = (argc > 6) ? argv[6] : NULL;
@@ -2911,7 +2987,11 @@ int main(int argc, char *argv[]) {
         printf("Directory contents containerized into '%s'.\n", argv[4]);
     } else if (strcmp(argv[1], "-oexec") == 0) {
         if (argc < 3) {
-            fprintf(stderr, "Usage for execute: %s -execute <bin_file> [-port <port>]\n", argv[0]);
+            fprintf(stderr, "Usage for oexec: %s -oexec <bin_file>\n", argv[0]);
+            return EXIT_FAILURE;
+        }
+        if (geteuid() != 0) {
+            fprintf(stderr, "This program must be run as root. Try using sudo.\n");
             return EXIT_FAILURE;
         }
 
@@ -2926,6 +3006,10 @@ int main(int argc, char *argv[]) {
     } else if (strcmp(argv[1], "-network") == 0) {
         if (argc < 4) {
             fprintf(stderr, "Usage: %s -network <create|remove> <name> [vlan_id]\n", argv[0]);
+            return EXIT_FAILURE;
+        }
+        if (geteuid() != 0) {
+            fprintf(stderr, "This program must be run as root. Try using sudo.\n");
             return EXIT_FAILURE;
         }
 
@@ -2949,6 +3033,10 @@ int main(int argc, char *argv[]) {
     else if (strcmp(argv[1], "-run") == 0) {
         if (argc < 4) {
             fprintf(stderr, "Usage: %s -run <container_file> <network_name> [-port <port>]\n", argv[0]);
+            return EXIT_FAILURE;
+        }
+        if (geteuid() != 0) {
+            fprintf(stderr, "This program must be run as root. Try using sudo.\n");
             return EXIT_FAILURE;
         }
 
@@ -2977,6 +3065,10 @@ int main(int argc, char *argv[]) {
     } else if (strcmp(argv[1], "-start") == 0) {
         if (argc < 4) {
             fprintf(stderr, "Usage: %s -start <volume_name> <network_name> [-port <port>]\n", argv[0]);
+            return EXIT_FAILURE;
+        }
+        if (geteuid() != 0) {
+            fprintf(stderr, "This program must be run as root. Try using sudo.\n");
             return EXIT_FAILURE;
         }
 
@@ -3034,6 +3126,10 @@ int main(int argc, char *argv[]) {
     } else if (strcmp(argv[1], "-ostart") == 0) {
         if (argc < 2) {
             fprintf(stderr, "Usage: %s -ostart <volume_name>\n", argv[0]);
+            return EXIT_FAILURE;
+        }
+        if (geteuid() != 0) {
+            fprintf(stderr, "This program must be run as root. Try using sudo.\n");
             return EXIT_FAILURE;
         }
 
@@ -3110,6 +3206,10 @@ int main(int argc, char *argv[]) {
             fprintf(stderr, "Usage: %s -deploy <config_file> [-port <port>]\n", argv[0]);
             return EXIT_FAILURE;
         }
+        if (geteuid() != 0) {
+            fprintf(stderr, "This program must be run as root. Try using sudo.\n");
+            return EXIT_FAILURE;
+        }
         int deploy_port = 0;
         for (int i = 3; i < argc; i++) {
             if (strcmp(argv[i], "-port") == 0 && i + 1 < argc) {
@@ -3150,6 +3250,23 @@ int main(int argc, char *argv[]) {
             return EXIT_FAILURE;
         }
         extract_container(argv[2], argv[3]);
+    } else if (strcmp(argv[1], "-add_plugin") == 0) {
+        if (argc != 3) {
+            fprintf(stderr, "Usage: %s -add_plugin <plugin_source_file>\n", argv[0]);
+            return EXIT_FAILURE;
+        }
+        if (geteuid() != 0) {
+            fprintf(stderr, "This program must be run as root. Try using sudo.\n");
+            return EXIT_FAILURE;
+        }
+
+        const char* plugin_source = argv[2];
+        if (add_plugin(plugin_source) != 0) {
+            fprintf(stderr, "Failed to add plugin: %s\n", plugin_source);
+            return EXIT_FAILURE;
+        }
+        printf("Plugin added successfully. Please restart the program.\n");
+        return EXIT_SUCCESS;  // Exit after adding plugin
     } else if (strcmp(argv[1], "-help") == 0) {
         printf("Available commands:\n");
         printf("  -contain <directory_path> <output_file> <path_to_start_config_file> <path_to_container_config_file>\n");
@@ -3194,7 +3311,9 @@ int main(int argc, char *argv[]) {
         printf("Checks for updates and the current version\n");
         printf("  -update\n");
         printf("Checks for updates and updates the current version\n");
-    } else if (strcmp(argv[1], "--version") == 0) {
+        printf("  -add_plugin <plugin_source_file>\n");
+        printf("Adds a plugin\n");
+    } else if (argc > 1 && strcmp(argv[1], "--version") == 0) {
         char* latest_version = fetch_latest_version();
         if (latest_version) {
             int comparison = compare_versions(VERSION, latest_version);
@@ -3204,6 +3323,8 @@ int main(int argc, char *argv[]) {
                 printf("Please visit https://github.com/Okerew/osxiec/releases/latest to update.\n");
             } else if (comparison == 0) {
                 printf("You are running the latest version (%s).\n", VERSION);
+            } else {
+                printf("Your version (%s) is newer than the latest known version (%s).\n", VERSION, latest_version);
             }
             free(latest_version);
         } else {
@@ -3288,7 +3409,7 @@ int main(int argc, char *argv[]) {
             start_network_listener(argv[1]);
         }
         else {
-            printf("This futures is not accessible in the api\n");
+            printf("This feature is not accessible in the api\n");
         }
     } else {
         fprintf(stderr, "Unknown command: %s\n", argv[1]);
