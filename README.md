@@ -193,6 +193,11 @@ osxiec -api {argument}
 ```sh
 sudo osxiec -update
 ```
+
+**Add plugin** adds a plugin
+```sh
+sudo osxiec -add_plugin {path_to_source.c}
+```
 ## Creating a container
 Make sure to include any dependencies or executables you can obtain these by searching for where a dependency or executable is located and copying it along with it's dependencies.
 
