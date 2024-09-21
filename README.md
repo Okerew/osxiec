@@ -179,13 +179,13 @@ sudo osxiec -craft {directory_path} {bin_input_file} {output_file} {start_config
 
 **Start** starts a container a stopped container
 ```sh
-osxiec -start {volume_name} {network} -port {PORT_NUMBER} 
+sudo osxiec -start {volume_name} {network} -port {PORT_NUMBER} 
 ```
 port is optional
 
 **Ostart** starts a container a stopped container in offline mode
 ```sh
-osxiec -ostart {volume_name} 
+sudo osxiec -ostart {volume_name} 
 ```
 
 **Api** an api that exposes some more functions of the cli
@@ -196,6 +196,11 @@ osxiec -api {argument}
 **Update** checks for updates and updates
 ```sh
 sudo osxiec -update
+```
+
+**Add plugin** adds a plugin
+```sh
+sudo osxiec -add_plugin {path_to_source.c}
 ```
 ## Creating a container
 Make sure to include any dependencies or executables you can obtain these by searching for where a dependency or executable is located and copying it along with it's dependencies.
