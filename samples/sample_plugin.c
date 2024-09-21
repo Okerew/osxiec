@@ -1,10 +1,12 @@
 // sample_plugin.c
-#include "plugin.h"
+#include "plugin_manager/plugin.h"
 #include <stdio.h>
 #include <string.h>
+#include "osxiec.h"
 
 static int sample_initialize(void) {
     printf("Sample plugin initialized\n");
+    execute_command("echo hello", "");
     return 0;
 }
 
