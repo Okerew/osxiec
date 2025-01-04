@@ -39,7 +39,7 @@
 #define MAX_MEMORY_LIMIT 2147483648 // 2 GB max memory limit
 #define MAX_HISTORY_LEN 100
 #define MAX_LINE_LEN 1024
-#define VERSION "v0.72"
+#define VERSION "v0.73"
 
 int port = PORT;
 
@@ -2019,6 +2019,346 @@ stop_loop:
     }
 }
 
+void gcreate_isolated_environment(FILE *bin_file, const char *bin_file_path) {
+    signal(SIGTERM, handle_signal);
+    signal(SIGINT, handle_signal);
+    signal(SIGSEGV, handle_signal);
+    ContainerConfig config;
+    fread(&config, sizeof(ContainerConfig), 1, bin_file);
+
+    int num_files;
+    fread(&num_files, sizeof(int), 1, bin_file);
+
+    char shared_folder_path[] = "/Volumes/SharedContainer";
+    mkdir(shared_folder_path, 0755);
+
+    char disk_image_path[MAX_PATH_LEN];
+    snprintf(disk_image_path, sizeof(disk_image_path), "/tmp/container_disk_%d.dmg", getpid());
+
+    // Assign the volume name as the bin_file_path
+    char create_disk_command[MAX_COMMAND_LEN];
+    struct stat st;
+    if (stat(bin_file_path, &st) == -1) {
+        perror("stat");
+    }
+
+    // Get the size of the file in bytes
+    off_t file_size = st.st_size;
+
+    // Convert the size to gigabytes and add 1 GB
+    double size_in_gb = (double)file_size / (1024 * 1024 * 1024) + 1.0;
+
+    // Format the size to two decimal places
+    snprintf(create_disk_command, sizeof(create_disk_command),
+             "hdiutil create -size %.2fg -fs HFS+ -volname \"%s\" %s",
+             size_in_gb, bin_file_path, disk_image_path);
+
+    system(create_disk_command);
+
+    chmod(disk_image_path, 0644);
+
+    char mount_command[MAX_COMMAND_LEN];
+    snprintf(mount_command, sizeof(mount_command), "hdiutil attach %s", disk_image_path);
+    system(mount_command);
+
+    // Use bin_file_path as the root volume name
+    char container_root[MAX_PATH_LEN];
+    snprintf(container_root, sizeof(container_root), "/Volumes/%s", bin_file_path);
+
+    char shared_mount_point[MAX_PATH_LEN];
+    snprintf(shared_mount_point, sizeof(shared_mount_point), "%s/shared", container_root);
+    symlink(shared_folder_path, shared_mount_point);
+
+    for (int i = 0; i < num_files; i++) {
+        File file;
+        fread(file.name, sizeof(char), MAX_PATH_LEN, bin_file);
+        fread(&file.size, sizeof(size_t), 1, bin_file);
+
+        file.data = malloc(file.size);
+        if (file.data == NULL) {
+            perror("Error allocating memory for file data");
+            exit(EXIT_FAILURE);
+        }
+
+        fread(file.data, 1, file.size, bin_file);
+
+        char file_path[MAX_PATH_LEN];
+        snprintf(file_path, sizeof(file_path), "%s/%s", container_root, file.name);
+
+        create_directories(file_path);
+
+        FILE *out_file = fopen(file_path, "wb");
+        if (out_file == NULL) {
+            perror("Error creating file in container");
+            exit(EXIT_FAILURE);
+        }
+
+        fwrite(file.data, 1, file.size, out_file);
+        fclose(out_file);
+        free(file.data);
+
+        chmod(file_path, 0755);
+    }
+
+    chmod(container_root, 0755);
+
+    if (chdir(container_root) != 0) {
+        perror("Failed to change to container root directory");
+        exit(1);
+    }
+
+    if (setgid(config.container_gid) != 0) {
+        perror("Failed to set group ID");
+        exit(1);
+    }
+
+    if (setuid(config.container_uid) != 0) {
+        perror("Failed to set user ID");
+        exit(1);
+    }
+
+    apply_resource_limits(&config);
+
+    char sandbox_profile[2048];
+    snprintf(sandbox_profile, sizeof(sandbox_profile),
+        "(version 1)"
+        "(allow default)"  // Change default policy to allow
+        "(deny file-read* (subpath \"/Applications\"))"  // Deny access to /Applications
+        "(deny file-read* (subpath \"/Users\"))"         // Deny access to /Users
+        "(deny file-read* (subpath \"/sbin\"))"       // Deny acces to sbin
+        "(allow process-fork)"
+        "(allow file-read*)"
+        "(allow file-write* (subpath \"%s\"))"
+        "(allow file-read* (subpath \"%s\"))"
+        "(allow file-read* (literal \"%s\"))"
+        "(allow file-read* (subpath \"/usr/lib\"))"
+        "(allow file-read* (subpath \"/usr/bin\"))"
+        "(allow file-read* (subpath \"/bin\"))"
+        "(allow file-read* (subpath \"/System\"))"
+        "(allow file-read* (subpath \"%s\"))"
+        "(allow file-read* (subpath \"/Applications/Xcode.app\"))"
+        "(allow file-write* (subpath \"%s\"))"
+        "(allow sysctl-read)"
+        "(allow mach-lookup)"
+        "(allow network-outbound (remote ip))"
+        "(allow network-inbound (local ip))"
+        "(allow process-exec (subpath \"/usr/bin\"))"
+        "(allow process-exec (subpath \"/Applications/Xcode.app\"))"
+        "(allow process-exec (subpath \"/bin\"))"
+        "(deny file-read* (subpath \"/Library\"))"  // Deny access to /Library
+        "(allow file-read* (subpath \"/Library/Audio\"))"
+        "(allow file-read* (subpath \"/Library/Caches\"))"
+        "(allow file-read* (subpath \"/Library/Developer\"))"
+        "(allow file-read* (subpath \"/Library/DriverExtensions\"))"
+        "(allow file-read* (subpath \"/Library/Extensions\"))"
+        "(allow file-read* (subpath \"/Library/Fonts\"))"
+        "(allow file-read* (subpath \"/Library/Frameworks\"))"
+        "(allow file-read* (subpath \"/Library/Graphics\"))"
+        "(allow file-read* (subpath \"/Library/GPUBundles\"))"
+        "(allow file-read* (subpath \"/Library/Image Capture\"))"
+        "(allow file-read* (subpath \"/Library/Input Methods\"))"
+        "(allow file-read* (subpath \"/Library/LaunchAgents\"))"
+        "(allow file-read* (subpath \"/Library/KernelCollections\"))"
+        "(allow file-read* (subpath \"/Library/LaunchDaemons\"))"
+        "(allow file-read* (subpath \"/Library/Logs\"))"
+        "(allow file-read* (subpath \"/Library/OSAnalytics\"))"
+        "(allow file-read* (subpath \"/Library/Preferences\"))"
+        "(allow file-read* (subpath \"/Library/Scripts\"))"
+        "(allow file-read* (subpath \"/Library/Speech\"))"
+        "(allow file-read* (subpath \"/Library/WebServer\"))"
+        "(allow process-exec (subpath \"%s\"))",
+        container_root, container_root, bin_file_path,
+        shared_mount_point, shared_mount_point, container_root
+    );
+
+
+    char *error;
+    if (sandbox_init(sandbox_profile, 0, &error) != 0) {
+        fprintf(stderr, "sandbox_init failed: %s\n", error);
+        sandbox_free_error(error);
+        exit(1);
+    }
+
+    printf("\n=== Container %s Terminal ===\n", bin_file_path);
+    printf("Enter commands (type 'exit' to quit, help for help):\n");
+    printf("If you just ran the container ignore the first log file error");
+
+    if (config.start_config[0] != '\0') {
+        char start_config_path[MAX_PATH_LEN];
+        snprintf(start_config_path, sizeof(start_config_path), "%s/%s", container_root, config.start_config);
+        execute_start_config(start_config_path, container_root);
+    }
+
+    char command[MAX_COMMAND_LEN];
+    int command_index = 0;
+    int cursor_pos = 0;
+
+    set_terminal_raw_mode();
+
+    pthread_t logger;
+    pthread_create(&logger, NULL, logger_thread, &config);
+
+    while (1) {
+        if (should_exit) {
+            break;
+        }
+
+        printf("> ");
+        fflush(stdout);
+
+        int ch;
+        while ((ch = getchar()) != EOF) {
+            if (ch == 27) { // ESC key
+                getchar(); // Skip the next character
+                ch = getchar(); // Get the actual key code
+                if (ch == 'A') { // Up arrow
+                    navigate_history(command, &command_index, &cursor_pos, -1);
+                } else if (ch == 'B') { // Down arrow
+                    navigate_history(command, &command_index, &cursor_pos, 1);
+                } else if (ch == 'C') { // Right arrow
+                    if (cursor_pos < command_index) {
+                        move_cursor_right(1);
+                        cursor_pos++;
+                    }
+                } else if (ch == 'D') { // Left arrow
+                    if (cursor_pos > 0) {
+                        move_cursor_left(1);
+                        cursor_pos--;
+                    }
+                }
+            } else if (ch == 127 || ch == 8) { // Backspace or Delete
+                if (cursor_pos > 0) {
+                    move_cursor_left(1);
+                    clear_line();
+                    memmove(&command[cursor_pos - 1], &command[cursor_pos], command_index - cursor_pos + 1);
+                    command_index--;
+                    cursor_pos--;
+                    printf("%s", &command[cursor_pos]);
+                    move_cursor_left(command_index - cursor_pos);
+                }
+            } else if (ch == '\n' || ch == '\r') { // Enter key
+                command[command_index] = '\0';
+                set_terminal_canonical_mode();
+                usleep(10000); // 10ms delay
+
+                if (strcmp(command, "exit") == 0) goto exit_loop;
+                if (strcmp(command, "debug") == 0) {
+                    debug_mode = DEBUG_STEP;
+                    printf("Entered debug mode. Type 'help' for debug commands.\n");
+                } else if (strncmp(command, "scale", 5) == 0) {
+                    long memory_soft_limit, memory_hard_limit;
+                    int cpu_priority;
+                    if (sscanf(command, "scale %ld %ld %d", &memory_soft_limit, &memory_hard_limit, &cpu_priority) == 3) {
+                        scale_container_resources(memory_soft_limit, memory_hard_limit, cpu_priority);
+                    } else {
+                        printf("Usage: scale <memory_soft_limit> <memory_hard_limit> <cpu_priority>\n");
+                    }
+                } else if (strncmp(command, "xs", 6) == 0) {
+                    char *script_content = command + 7;
+                    handle_script_command(script_content);
+                } else if (strncmp(command, "osxs", 4) == 0) {
+                    char *filename = command + 5;
+                    while (isspace(*filename)) {
+                        filename++;
+                    }
+                    handle_script_file(filename);
+                } else if (strcmp(command, "autoscale") == 0) {
+                    start_auto_scaling(&config);
+                } else if (strcmp(command, "status") == 0) {
+                    print_current_resource_usage(&config);
+                } else if (strcmp(command, "help") == 0) {
+                    printf("Commands:\n");
+                    printf("  exit: Exit the container\n");
+                    printf("  debug: Enter debug mode\n");
+                    printf("  scale <memory_soft_limit> <memory_hard_limit> <cpu_priority>: Set memory limits and CPU priority\n");
+                    printf("  xs <script_content>: Execute a script in the container\n");
+                    printf("  osxs <filename>: Execute a script file in the container\n");
+                    printf("  autoscale: Start automatic resource scaling\n");
+                    printf("  status: Print current resource usage\n");
+                    printf("  help: Print this help message\n");
+                    printf(" stop: Stops the container and saves its state\n");
+                } else if (strcmp(command, "stop") == 0) {
+                    printf("Stopping container...\n");
+
+                    // Save the container state
+                    char state_file_path[MAX_PATH_LEN];
+                    snprintf(state_file_path, sizeof(state_file_path), "%s/%s", container_root, bin_file_path);
+                    FILE *state_file = fopen(state_file_path, "wb");
+                    if (state_file == NULL) {
+                        perror("Error creating container state file");
+                    } else {
+                        // Save the container configuration
+                        fwrite(&config, sizeof(ContainerConfig), 1, state_file);
+
+                        // Save the environment variables
+                        fwrite(&container_state, sizeof(ContainerState), 1, state_file);
+                        fclose(state_file);
+                        printf("Container state saved to %s\n", state_file_path);
+                    }
+
+                    goto stop_loop;
+                } else {
+                    execute_command(command, container_root);
+                }
+
+                printf("\n");
+                add_to_history(command);
+                char log_file_path[MAX_PATH_LEN];
+                snprintf(log_file_path, sizeof(log_file_path), "%s/log.txt", container_root);
+                FILE *log_file = fopen(log_file_path, "a");
+                if (log_file == NULL) {
+                    perror("Failed to open log file");
+                    printf("If you just ran the container ignore this");
+                } else {
+                    fprintf(log_file, "\nCommand History:\n");
+                    for (int i = 0; i < command_index; i++) {
+                        fprintf(log_file, "Command %d: %s\n", i + 1, history.commands[i]);
+                    }
+                    fclose(log_file);
+                }
+                command_index = 0;
+                cursor_pos = 0;
+                set_terminal_raw_mode();
+                printf("> ");
+                fflush(stdout);
+            } else {
+                if (command_index < MAX_COMMAND_LEN - 1) {
+                    memmove(&command[cursor_pos + 1], &command[cursor_pos], command_index - cursor_pos + 1);
+                    command[cursor_pos] = ch;
+                    command_index++;
+                    cursor_pos++;
+                    printf("%s", &command[cursor_pos - 1]);
+                    move_cursor_left(command_index - cursor_pos);
+                }
+            }
+        }
+    }
+
+exit_loop:
+    set_terminal_canonical_mode();
+    printf("Container terminated.\n");
+
+    pthread_cancel(logger);
+    pthread_join(logger, NULL);
+
+    for (int i = 0; i < container_state.num_env_vars; i++) {
+        free(container_state.environment_variables[i]);
+    }
+    free(container_state.environment_variables);
+    exit(0);
+
+stop_loop:
+    set_terminal_canonical_mode();
+    printf("Container stopped.\n");
+    pthread_cancel(logger);
+    pthread_join(logger, NULL);
+
+    // Preserve the environment variables
+    for (int i = 0; i < container_state.num_env_vars; i++) {
+        setenv(container_state.environment_variables[i], NULL, 1);
+    }
+}
+
 size_t write_data(void *ptr, size_t size, size_t nmemb, FILE *stream) {
     size_t written = fwrite(ptr, size, nmemb, stream);
     return written;
@@ -2896,6 +3236,36 @@ int add_plugin(const char* plugin_source) {
     return 0;
 }
 
+int remove_plugin(const char* plugin_name) {
+    // Get the user's home directory
+    const char* home_dir = getenv("HOME");
+    if (home_dir == NULL) {
+        struct passwd* pwd = getpwuid(getuid());
+        if (pwd == NULL) {
+            fprintf(stderr, "Unable to determine home directory\n");
+            return EXIT_FAILURE;
+        }
+        home_dir = pwd->pw_dir;
+    }
+
+    // Define the plugin directory in the user's home
+    char plugin_dir[MAX_PATH_LEN];
+    snprintf(plugin_dir, sizeof(plugin_dir), "%s/.osxiec/plugins", home_dir);
+
+    // Remove the plugin from the plugin directory
+    char remove_command[1024];
+    snprintf(remove_command, sizeof(remove_command),
+             "rm -f %s/%s.dylib", plugin_dir, plugin_name);
+
+    if (system(remove_command) != 0) {
+        fprintf(stderr, "Failed to remove plugin\n");
+        return -1;
+    }
+
+    printf("Plugin '%s' has been successfully removed from the plugin directory.\n", plugin_name);
+
+    return 0;
+}
 int main(int argc, char *argv[]) {
     PluginManager plugin_manager;
     plugin_manager_init(&plugin_manager);
@@ -3002,6 +3372,24 @@ int main(int argc, char *argv[]) {
         }
 
         ocreate_isolated_environment(bin_file, argv[2]);
+        fclose(bin_file);
+    } else if(strcmp(argv[1], "-gexec") == 0) {
+        if (argc < 3) {
+            fprintf(stderr, "Usage for gexec: %s -gexec <bin_file>\n", argv[0]);
+            return EXIT_FAILURE;
+        }
+        if (geteuid() != 0) {
+            fprintf(stderr, "This program must be run as root. Try using sudo.\n");
+            return EXIT_FAILURE;
+        }
+
+        FILE *bin_file = fopen(argv[2], "rb");
+        if (bin_file == NULL) {
+            perror("Error opening binary file");
+            return EXIT_FAILURE;
+        }
+
+        gcreate_isolated_environment(bin_file, argv[2]);
         fclose(bin_file);
     } else if (strcmp(argv[1], "-network") == 0) {
         if (argc < 4) {
@@ -3169,6 +3557,52 @@ int main(int argc, char *argv[]) {
 
         fclose(bin_file);
         free(latest_bin_file_path);
+    } else if (strcmp(argv[1], "-gstart") == 0) {
+        if (argc < 2) {
+            fprintf(stderr, "Usage: %s -gstart <volume_name>\n", argv[0]);
+            return EXIT_FAILURE;
+        }
+        if (geteuid() != 0) {
+            fprintf(stderr, "This program must be run as root. Try using sudo.\n");
+            return EXIT_FAILURE;
+        }
+
+        // Find the latest binary file in the specified volume
+        const char *volume_name = argv[2];
+        char *latest_bin_file_path = find_latest_bin_file(volume_name);
+
+        if (latest_bin_file_path == NULL) {
+            fprintf(stderr, "No valid .bin file found for volume %s\n", volume_name);
+            return EXIT_FAILURE;
+        }
+
+        // Copy the latest file to the root of the volume with just the volume name
+        char dest_folder[MAX_PATH_LEN];
+        snprintf(dest_folder, sizeof(dest_folder), "/Volumes/%s", volume_name);
+
+        if (copy_file(latest_bin_file_path, dest_folder, volume_name) != 0) {
+            fprintf(stderr, "Failed to copy binary file to volume root\n");
+            free(latest_bin_file_path);
+            return EXIT_FAILURE;
+        }
+
+        // Open the copied binary file
+        char full_dest_path[MAX_PATH_LEN];
+        snprintf(full_dest_path, sizeof(full_dest_path), "%s/%s", dest_folder, volume_name);
+
+        printf("Opening binary file: %s\n", full_dest_path);
+        FILE *bin_file = fopen(full_dest_path, "rb");
+        if (bin_file == NULL) {
+            perror("Error opening binary file");
+            fprintf(stderr, "Failed to open: %s\n", full_dest_path);
+            free(latest_bin_file_path);
+            return EXIT_FAILURE;
+        }
+
+        gcreate_isolated_environment(bin_file, volume_name);
+
+        fclose(bin_file);
+        free(latest_bin_file_path);
     } else if (strcmp(argv[1], "-pull") == 0) {
         if (argc != 3) {
             printf("Usage: %s -pull <file_name>\n", argv[0]);
@@ -3267,6 +3701,23 @@ int main(int argc, char *argv[]) {
         }
         printf("Plugin added successfully. Please restart the program.\n");
         return EXIT_SUCCESS;  // Exit after adding plugin
+    } else if (strcmp(argv[1], "-remove_plugin") == 0) {
+        if (argc != 3) {
+            fprintf(stderr, "Usage: %s -remove_plugin <plugin_name>\n", argv[0]);
+            return EXIT_FAILURE;
+        }
+        if (geteuid() != 0) {
+            fprintf(stderr, "This program must be run as root. Try using sudo.\n");
+            return EXIT_FAILURE;
+        }
+
+        const char* plugin_name = argv[2];
+        if (remove_plugin(plugin_name) != 0) {
+            fprintf(stderr, "Failed to remove plugin: %s\n", plugin_name);
+            return EXIT_FAILURE;
+        }
+        printf("Plugin removed successfully. Please restart the program.\n");
+        return EXIT_SUCCESS;  // Exit after removing plugin
     } else if (strcmp(argv[1], "-help") == 0) {
         printf("Available commands:\n");
         printf("  -contain <directory_path> <output_file> <path_to_start_config_file> <path_to_container_config_file>\n");
@@ -3275,9 +3726,11 @@ int main(int argc, char *argv[]) {
         printf("Crafts a container file from a directory and a bin file\n");
         printf(" -oexec <container_file>\n");
         printf("Executes a container file in offline mode\n");
-        printf(" -start <container_file> <network_name> [-port <port>]\n");
+        printf(" -gexec <container_file>\n");
+        printf("Executes a container file wile allowing gui applications (note this is doesn't support online mode and has far limited isolation compared to other modes)\n");
+        printf(" -start <container_file> <network_name>\n");
         printf("Starts a stopped container");
-        printf(" -ostart <container_file> <network_name> [-port <port>]\n");
+        printf(" -ostart <container_file>\n");
         printf("Starts a stopped container in offline mode");
         printf("  -network <create|remove> <name> [vlan_id>\n");
         printf("Manages the vlan network\n");
@@ -3313,6 +3766,8 @@ int main(int argc, char *argv[]) {
         printf("Checks for updates and updates the current version\n");
         printf("  -add_plugin <plugin_source_file>\n");
         printf("Adds a plugin\n");
+        printf("  -remove_plugin <plugin_name>\n");
+        printf("Removes a plugin\n");
     } else if (argc > 1 && strcmp(argv[1], "--version") == 0) {
         char* latest_version = fetch_latest_version();
         if (latest_version) {
