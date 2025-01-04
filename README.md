@@ -161,7 +161,10 @@ sudo osxiec -deploym {config_file}
 ```sh
 sudo osxiec -oexec {bin_file_path}
 ```
-
+**Gexec** executes a container in gui mode
+```sh
+sudo osxiec -gexec {bin_file_path}
+```
 **Extract** extracts files and folders from a container
 ```sh
 sudo osxiec -extract {bin_file_path}
@@ -187,7 +190,10 @@ port is optional
 ```sh
 sudo osxiec -ostart {volume_name} 
 ```
-
+**Gstart** starts a container a stopped container in gui mode
+```sh
+sudo osxiec -gstart {volume_name}
+```
 **Api** an api that exposes some more functions of the cli
 ```sh
 osxiec -api {argument}
@@ -196,11 +202,6 @@ osxiec -api {argument}
 **Update** checks for updates and updates
 ```sh
 sudo osxiec -update
-```
-
-**Add plugin** adds a plugin
-```sh
-sudo osxiec -add_plugin {path_to_source.c}
 ```
 ## Creating a container
 Make sure to include any dependencies or executables you can obtain these by searching for where a dependency or executable is located and copying it along with it's dependencies.
