@@ -291,6 +291,12 @@ If you want to access the container terminal just press enter.
 6. **autoscale** automatically scales the resources of the container
 7. **status** shows the status of the container
 8. **stop** stops the container.
+9. **wait** waits for a command(background task) in a container to stop.
+10. **ps** shows all the running commands(background tasks) in the container.
+11. **pause** pauses all background tasks in the container
+12. **unpause** unpauses all background tasks in the container
+13. **br** runs a command in background
+
 ## Creating a vlan network
 To create a network you can run `osxiec -network create {network_name} {vlan_id}`
 
