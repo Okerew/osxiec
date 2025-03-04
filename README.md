@@ -199,10 +199,25 @@ sudo osxiec -gstart {volume_name}
 osxiec -api {argument}
 ```
 
-**Update** checks for updates and updates
+**Update** updates configuration of a container
 ```sh
 sudo osxiec -update
 ```
+
+**Check for update** checks for update
+```sh
+sudo osxiec -check-for-update
+```
+**copy-volume** Copies files form a container volume to a directory
+```sh
+sudo osxiec -copy-volume {volume_name} {target_directory}
+```
+
+**bcn** Broadcasts a command to the container network
+```sh
+sudo osxiec -bcn {network_name} {command}
+```
+
 ## Creating a container
 Make sure to include any dependencies or executables you can obtain these by searching for where a dependency or executable is located and copying it along with it's dependencies.
 
@@ -582,4 +597,5 @@ After this on the execution of osxiec command the plugin will be loaded.
   Chroot requires for SIP to be disabled, which causes many security risks, chroot can be easily exited by any process, using the normal macOS restrictions is way more secure, reliable,
   having it disabled causes many permission issues.
 - **Sandbox deprecation error** yes I know that sandbox innit is deprecated but there isn't really an alternative for it unless I would use xcode and there is no way I am using it to rebuild this.
----
+
+- **If you want to remove ips from the network do it by editing the file in private/etc/network_{network_name}.conf file**
