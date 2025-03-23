@@ -13,6 +13,7 @@
 #include <readline/readline.h>
 #include <regex.h>
 #include <sandbox.h>
+#include <signal.h>
 #include <spawn.h>
 #include <stdbool.h>
 #include <stdlib.h>
@@ -39,8 +40,11 @@
 #define MAX_MEMORY_LIMIT 2147483648 // 2 GB max memory limit
 #define MAX_HISTORY_LEN 100
 #define MAX_LINE_LEN 1024
-#define VERSION "v0.73"
+#define VERSION "v0.9"
 #define MAX_BACKGROUND_THREADS 32
+#define EVENT_CONTAINER_STOP 0
+#define EVENT_CONTAINER_START 1
+#define MAX_SCHEDULED_TASKS 32
 
 int port = PORT;
 
@@ -907,16 +911,20 @@ ContainerNetwork load_container_network(const char *name) {
   return network;
 }
 
-void create_and_save_container_network(const char *name, int vlan_id) {
+void create_and_save_container_network(const char *name, int vlan_id,
+                                       const char *allowed_ip) {
   ContainerNetwork network;
   strncpy(network.name, name, MAX_PATH_LEN - 1);
+  network.name[MAX_PATH_LEN - 1] = '\0'; // Ensure null termination
   network.vlan_id = vlan_id;
   network.num_containers = 0;
+
+  // Set allowed IP if provided, otherwise set to NULL or empty string
+  char has_allowed_ip = (allowed_ip != NULL && strlen(allowed_ip) > 0);
 
   // Save the network configuration to a file
   char filename[MAX_PATH_LEN];
   snprintf(filename, sizeof(filename), "/tmp/network_%s.conf", name);
-
   FILE *file = fopen(filename, "w");
   if (file == NULL) {
     perror("Failed to save network configuration");
@@ -925,10 +933,20 @@ void create_and_save_container_network(const char *name, int vlan_id) {
 
   fprintf(file, "name=%s\n", network.name);
   fprintf(file, "vlan_id=%d\n", network.vlan_id);
-  fclose(file);
 
-  printf("Created and saved network %s with VLAN ID %d\n", network.name,
-         network.vlan_id);
+  // Add the allowed IP to the configuration if specified
+  if (has_allowed_ip) {
+    fprintf(file, "allowed_ip=%s\n", allowed_ip);
+    printf("Created and saved network %s with VLAN ID %d and restricted to IP "
+           "%s\n",
+           network.name, network.vlan_id, allowed_ip);
+  } else {
+    printf("Created and saved network %s with VLAN ID %d with no IP "
+           "restrictions\n",
+           network.name, network.vlan_id);
+  }
+
+  fclose(file);
 }
 
 void remove_container_network(const char *name) {
@@ -1642,9 +1660,9 @@ void start_network_thread(pthread_t network_thread, int network_thread_active) {
     printf("Network listener is already running\n");
     return;
   }
-  
+
   if (pthread_create(&network_thread, NULL,
-                   (void *(*)(void *))start_network_listener, NULL) != 0) {
+                     (void *(*)(void *))start_network_listener, NULL) != 0) {
     perror("Failed to create network listener thread");
   } else {
     network_thread_active = 1;
@@ -1657,11 +1675,511 @@ void stop_network_thread(pthread_t network_thread, int network_thread_active) {
     printf("Network listener is not running\n");
     return;
   }
-  
+
   pthread_cancel(network_thread);
   pthread_join(network_thread, NULL);
   network_thread_active = 0;
   printf("Network listener stopped successfully\n");
+}
+
+void trace_command(const char *command, const char *container_root) {
+  printf("Starting command tracing for: %s\n", command);
+  char trace_log_path[MAX_PATH_LEN];
+  snprintf(trace_log_path, sizeof(trace_log_path), "%s/trace_log.txt",
+           container_root);
+
+  // Create a unique wrapper script
+  char wrapper_path[MAX_PATH_LEN];
+  snprintf(wrapper_path, sizeof(wrapper_path), "%s/trace_wrapper_%d.sh",
+           container_root, (int)time(NULL));
+
+  FILE *wrapper = fopen(wrapper_path, "w");
+  if (!wrapper) {
+    perror("Failed to create wrapper script");
+    return;
+  }
+
+  // Create a script that will record execution info without requiring
+  // privileges
+  fprintf(wrapper, "#!/bin/sh\n");
+  fprintf(wrapper, "echo \"=== Command Trace: %s ===\" > %s\n", command,
+          trace_log_path);
+  fprintf(wrapper, "echo \"Started at $(date)\" >> %s\n", trace_log_path);
+  fprintf(wrapper, "echo \"Current directory: $(pwd)\" >> %s\n",
+          trace_log_path);
+  fprintf(wrapper, "echo \"Environment variables:\" >> %s\n", trace_log_path);
+  fprintf(wrapper, "env | sort >> %s\n", trace_log_path);
+  fprintf(wrapper, "echo \"\\nCommand output:\" >> %s\n", trace_log_path);
+  fprintf(wrapper, "echo \"-------------------\" >> %s\n", trace_log_path);
+  fprintf(wrapper, "# Run the command and capture timing info\n");
+  fprintf(wrapper, "START=$(date +%%s.%%N)\n");
+  fprintf(wrapper, "{ time %s ; } 2>&1 | tee -a %s\n", command, trace_log_path);
+  fprintf(wrapper, "END=$(date +%%s.%%N)\n");
+  fprintf(wrapper,
+          "echo \"\\nExecution time: $(echo \"$END - $START\" | bc) seconds\" "
+          ">> %s\n",
+          trace_log_path);
+  fprintf(wrapper, "echo \"Finished at $(date)\" >> %s\n", trace_log_path);
+  fprintf(wrapper, "echo \"Exit status: $?\" >> %s\n", trace_log_path);
+  fprintf(wrapper, "echo \"-------------------\" >> %s\n", trace_log_path);
+
+  // Replace ps command with /proc inspection for memory usage
+  fprintf(wrapper, "echo \"Memory usage after execution:\" >> %s\n",
+          trace_log_path);
+  fprintf(wrapper, "echo \"PID    COMMAND    RSS    VSZ\" >> %s\n",
+          trace_log_path);
+  fprintf(wrapper, "for pid in $(pgrep -f \"%s\"); do\n", command);
+  fprintf(wrapper, "  if [ -d \"/proc/$pid\" ]; then\n");
+  fprintf(wrapper,
+          "    cmd=$(cat /proc/$pid/cmdline | tr '\\0' ' ' | head -c 30)\n");
+  fprintf(wrapper, "    if [ -f \"/proc/$pid/status\" ]; then\n");
+  fprintf(wrapper,
+          "      rss=$(grep VmRSS /proc/$pid/status | awk '{print $2}')\n");
+  fprintf(wrapper,
+          "      vsz=$(grep VmSize /proc/$pid/status | awk '{print $2}')\n");
+  fprintf(wrapper,
+          "      echo \"$pid    $cmd    ${rss:-0}    ${vsz:-0}\" >> %s\n",
+          trace_log_path);
+  fprintf(wrapper, "    fi\n");
+  fprintf(wrapper, "  fi\n");
+  fprintf(wrapper, "done\n");
+
+  // Use lsof for file descriptors since it works
+  fprintf(wrapper, "echo \"File descriptors after execution:\" >> %s\n",
+          trace_log_path);
+  fprintf(wrapper, "for pid in $(pgrep -f \"%s\"); do\n", command);
+  fprintf(wrapper, "  echo \"File descriptors for PID $pid:\" >> %s\n",
+          trace_log_path);
+  fprintf(wrapper,
+          "  lsof -p $pid 2>/dev/null | head -20 >> %s 2>&1 || echo \"No file "
+          "descriptor info available\" >> %s\n",
+          trace_log_path, trace_log_path);
+  fprintf(wrapper, "done\n");
+
+  fclose(wrapper);
+  chmod(wrapper_path, 0755);
+
+  printf("Executing command with tracing...\n");
+  printf("----------------\n");
+
+  // Execute the wrapper script
+  system(wrapper_path);
+
+  // Read and display the log
+  FILE *log = fopen(trace_log_path, "r");
+  if (log) {
+    char buffer[1024];
+    while (fgets(buffer, sizeof(buffer), log)) {
+      printf("%s", buffer);
+    }
+    fclose(log);
+  }
+
+  // Clean up the wrapper script
+  unlink(wrapper_path);
+
+  printf("----------------\n");
+  printf("Trace completed. Log saved to %s\n", trace_log_path);
+}
+
+void trace_background_process(int process_id, const char *container_root) {
+  // First, check if the process ID exists and is a running background task
+  int valid_task = 0;
+  // Iterate through the background tasks
+  for (int i = 0; i < bg_manager.task_count; i++) {
+    BackgroundTask *task = &bg_manager.tasks[i];
+    if (task->pid == process_id && task->is_running == 1) {
+      valid_task = 1;
+      break;
+    }
+  }
+  if (!valid_task) {
+    printf("Error: Process ID %d is not a valid running background task\n",
+           process_id);
+    return;
+  }
+
+  printf("Starting trace for background process ID: %d\n", process_id);
+  char trace_log_path[MAX_PATH_LEN];
+  snprintf(trace_log_path, sizeof(trace_log_path), "%s/proc_trace_%d.txt",
+           container_root, process_id);
+
+  // Create a monitor script that samples the process periodically
+  char monitor_path[MAX_PATH_LEN];
+  snprintf(monitor_path, sizeof(monitor_path), "%s/proc_monitor_%d.sh",
+           container_root, process_id);
+
+  FILE *monitor = fopen(monitor_path, "w");
+  if (!monitor) {
+    perror("Failed to create monitor script");
+    return;
+  }
+
+  // Create a script that will monitor the process without requiring privileges
+  fprintf(monitor, "#!/bin/sh\n");
+  fprintf(monitor, "echo \"=== Process Trace: PID %d ===\" > %s\n", process_id,
+          trace_log_path);
+  fprintf(monitor, "echo \"Started monitoring at $(date)\" >> %s\n",
+          trace_log_path);
+
+  // Use /proc filesystem instead of ps for process info
+  fprintf(monitor, "echo \"\\nInitial process info:\" >> %s\n", trace_log_path);
+  fprintf(monitor,
+          "echo \"PID PPID COMMAND CPU MEM RSS VSZ STATE START TIME\" >> %s\n",
+          trace_log_path);
+  fprintf(monitor, "if [ -d \"/proc/%d\" ]; then\n", process_id);
+  fprintf(
+      monitor,
+      "  cmd=$(cat /proc/%d/cmdline 2>/dev/null | tr '\\0' ' ' | head -c 30)\n",
+      process_id);
+  fprintf(monitor,
+          "  ppid=$(cat /proc/%d/stat 2>/dev/null | awk '{print $4}')\n",
+          process_id);
+  fprintf(monitor,
+          "  state=$(cat /proc/%d/stat 2>/dev/null | awk '{print $3}')\n",
+          process_id);
+  fprintf(monitor, "  if [ -f \"/proc/%d/status\" ]; then\n", process_id);
+  fprintf(
+      monitor,
+      "    rss=$(grep VmRSS /proc/%d/status 2>/dev/null | awk '{print $2}')\n",
+      process_id);
+  fprintf(
+      monitor,
+      "    vsz=$(grep VmSize /proc/%d/status 2>/dev/null | awk '{print $2}')\n",
+      process_id);
+  fprintf(monitor, "  fi\n");
+  fprintf(monitor, "  start=$(stat -c %%Y /proc/%d 2>/dev/null)\n", process_id);
+  fprintf(monitor, "  if [ -n \"$start\" ]; then\n");
+  fprintf(monitor, "    start_time=$(date -d @$start '+%%H:%%M' 2>/dev/null || "
+                   "date -r $start '+%%H:%%M' 2>/dev/null)\n");
+  fprintf(monitor, "  else\n");
+  fprintf(monitor, "    start_time=\"unknown\"\n");
+  fprintf(monitor, "  fi\n");
+  fprintf(monitor, "  uptime=$(cut -d' ' -f1 /proc/uptime 2>/dev/null)\n");
+  fprintf(monitor, "  if [ -f \"/proc/%d/stat\" ]; then\n", process_id);
+  fprintf(monitor,
+          "    utime=$(cat /proc/%d/stat 2>/dev/null | awk '{print $14}')\n",
+          process_id);
+  fprintf(monitor,
+          "    stime=$(cat /proc/%d/stat 2>/dev/null | awk '{print $15}')\n",
+          process_id);
+  fprintf(monitor, "    if [ -n \"$utime\" ] && [ -n \"$stime\" ]; then\n");
+  fprintf(monitor, "      total_time=$((utime + stime))\n");
+  fprintf(monitor,
+          "      clock_ticks=$(getconf CLK_TCK 2>/dev/null || echo 100)\n");
+  fprintf(monitor, "      total_time_sec=$(echo \"scale=2; $total_time / "
+                   "$clock_ticks\" | bc 2>/dev/null)\n");
+  fprintf(monitor, "      echo \"$total_time_sec seconds CPU time\" >> %s\n",
+          trace_log_path);
+  fprintf(monitor, "    fi\n");
+  fprintf(monitor, "  fi\n");
+  fprintf(
+      monitor,
+      "  echo \"%d ${ppid:-?} ${cmd:-unknown} ${cpu:-?} ${mem:-?} ${rss:-0} "
+      "${vsz:-0} ${state:-?} ${start_time:-?} ${total_time_sec:-?}\" >> %s\n",
+      process_id, trace_log_path);
+  fprintf(monitor, "else\n");
+  fprintf(monitor,
+          "  echo \"Process %d not found in /proc filesystem\" >> %s\n",
+          process_id, trace_log_path);
+  fprintf(monitor, "fi\n");
+
+  fprintf(
+      monitor,
+      "echo \"\\nMonitoring process activity (Press Ctrl+C to stop):\" >> %s\n",
+      trace_log_path);
+  fprintf(monitor, "echo \"-------------------\" >> %s\n", trace_log_path);
+  fprintf(monitor, "while kill -0 %d 2>/dev/null; do\n", process_id);
+  fprintf(monitor, "  echo \"\\n[$(date)] Process snapshot:\" >> %s\n",
+          trace_log_path);
+
+  // Periodic process monitoring without ps
+  fprintf(monitor, "  if [ -d \"/proc/%d\" ]; then\n", process_id);
+  fprintf(monitor, "    echo \"Process status:\" >> %s\n", trace_log_path);
+  fprintf(monitor,
+          "    cat /proc/%d/status 2>/dev/null | grep -E "
+          "'Name|State|Pid|PPid|VmRSS|VmSize|Threads' >> %s 2>&1 || echo \"No "
+          "status info available\" >> %s\n",
+          process_id, trace_log_path, trace_log_path);
+  fprintf(monitor, "  fi\n");
+
+  // Use lsof for file and socket information
+  fprintf(monitor, "  echo \"Open files and sockets:\" >> %s\n",
+          trace_log_path);
+  fprintf(monitor,
+          "  lsof -p %d 2>/dev/null | head -20 >> %s 2>&1 || echo \"No file "
+          "descriptor info available\" >> %s\n",
+          process_id, trace_log_path, trace_log_path);
+
+  // Check for child processes using /proc
+  fprintf(monitor, "  echo \"Child processes:\" >> %s\n", trace_log_path);
+  fprintf(monitor, "  for cpid in /proc/[0-9]*/stat; do\n");
+  fprintf(monitor, "    if [ -f \"$cpid\" ]; then\n");
+  fprintf(monitor, "      ppid=$(cat $cpid 2>/dev/null | awk '{print $4}')\n");
+  fprintf(monitor, "      if [ \"$ppid\" = \"%d\" ]; then\n", process_id);
+  fprintf(monitor, "        pid=$(basename $(dirname $cpid))\n");
+  fprintf(monitor, "        cmd=$(cat /proc/$pid/cmdline 2>/dev/null | tr "
+                   "'\\0' ' ' | head -c 30)\n");
+  fprintf(monitor, "        echo \"$pid $ppid ${cmd:-unknown}\" >> %s\n",
+          trace_log_path);
+  fprintf(monitor, "      fi\n");
+  fprintf(monitor, "    fi\n");
+  fprintf(monitor, "  done\n");
+
+  fprintf(monitor, "  sleep 1\n");
+  fprintf(monitor, "done\n");
+  fprintf(
+      monitor,
+      "echo \"\\nProcess %d has terminated or is no longer visible\" >> %s\n",
+      process_id, trace_log_path);
+  fprintf(monitor, "echo \"Monitoring stopped at $(date)\" >> %s\n",
+          trace_log_path);
+
+  fclose(monitor);
+  chmod(monitor_path, 0755);
+
+  printf("Starting process monitoring. Press Ctrl+C to stop.\n");
+  printf("The log will be saved to %s\n", trace_log_path);
+
+  // Run the monitor script
+  char monitor_cmd[MAX_COMMAND_LEN];
+  snprintf(monitor_cmd, sizeof(monitor_cmd), "%s &", monitor_path);
+  system(monitor_cmd);
+
+  printf("Monitoring started in background. Use 'ls -la %s' to see the log "
+         "file.\n",
+         trace_log_path);
+  printf("You can view the log file at any time with 'cat %s'\n",
+         trace_log_path);
+}
+
+// Global variable declaration for the attach interrupt flag
+volatile sig_atomic_t attach_interrupted = 0;
+
+// Signal handler for attaching to processes
+void handle_attach_interrupt(int sig) { attach_interrupted = 1; }
+
+void live_process_inspection(const char *container_root) {
+  printf("\033[2J\033[H"); // Clear screen and move cursor to top
+  printf("Live Process Inspection (Press 'q' to exit)\n");
+  printf("%-6s %-10s %-5s %-5s %-10s %-10s %s\n", "PID", "USER", "CPU%", "MEM%",
+         "VSZ", "RSS", "COMMAND");
+
+  set_terminal_raw_mode();
+
+  int running = 1;
+  while (running) {
+    char ps_command[MAX_COMMAND_LEN];
+    snprintf(ps_command, sizeof(ps_command),
+             "ps -eo pid,user,pcpu,pmem,vsz,rss,comm | grep -v grep");
+
+    FILE *pipe = popen(ps_command, "r");
+    if (!pipe) {
+      perror("Failed to run ps command");
+      break;
+    }
+
+    // Skip header line from ps output
+    char buffer[1024];
+    fgets(buffer, sizeof(buffer), pipe);
+
+    printf("\033[3;1H"); // Move cursor to line 3
+    printf("\033[J");    // Clear from cursor to end of screen
+
+    int line = 0;
+    while (fgets(buffer, sizeof(buffer), pipe) != NULL) {
+      // Filter processes that belong to the container namespace
+      if (strstr(buffer, container_root) ||
+          1) { // Always true for now, implement proper filtering if needed
+        printf("%-80s\n", buffer);
+        line++;
+        if (line > 20)
+          break; // Limit display to 20 processes
+      }
+    }
+
+    pclose(pipe);
+
+    // Poll for keypress
+    fd_set fds;
+    struct timeval tv;
+    FD_ZERO(&fds);
+    FD_SET(STDIN_FILENO, &fds);
+    tv.tv_sec = 1;
+    tv.tv_usec = 0;
+
+    int result = select(STDIN_FILENO + 1, &fds, NULL, NULL, &tv);
+    if (result > 0) {
+      char c = getchar();
+      if (c == 'q' || c == 'Q') {
+        running = 0;
+      }
+    }
+  }
+
+  set_terminal_canonical_mode();
+  printf("\nExiting process inspector\n");
+}
+
+void attach_to_background_task(int task_id) {
+  if (task_id < 0 || task_id >= MAX_BACKGROUND_THREADS) {
+    printf("Invalid task ID\n");
+    return;
+  }
+
+  int valid_task = 0;
+  for (int i = 0; i < bg_manager.task_count; i++) {
+    if (i == task_id && bg_manager.tasks[i].is_running == 1) {
+      valid_task = 1;
+      break;
+    }
+  }
+
+  if (!valid_task) {
+    printf("No running task with ID %d\n", task_id);
+    return;
+  }
+
+  BackgroundTask *task = &bg_manager.tasks[task_id];
+  printf("Attaching to task %d (PID %d): %s\n", task_id, task->pid,
+         task->command);
+  printf("Press Ctrl+C to detach (this will NOT terminate the process)\n");
+
+  // Set up signal handler for Ctrl+C
+  struct sigaction sa;
+  memset(&sa, 0, sizeof(sa));
+  sa.sa_handler = handle_attach_interrupt;
+  sigaction(SIGINT, &sa, NULL);
+
+  set_terminal_raw_mode();
+
+  // Print current output
+  pthread_mutex_lock(&task->output_mutex);
+  printf("%s", task->output);
+  pthread_mutex_unlock(&task->output_mutex);
+
+  int running = 1;
+  char last_seen[4096] = {0};
+  strncpy(last_seen, task->output, sizeof(last_seen) - 1);
+
+  while (running && task->is_running == 1) {
+    // Check if there's new content in the task's output buffer
+    pthread_mutex_lock(&task->output_mutex);
+
+    // Check if output has changed
+    if (strcmp(last_seen, task->output) != 0) {
+      // Find the new content by comparing with what we've seen
+      size_t match_len = 0;
+      while (match_len < strlen(last_seen) &&
+             match_len < strlen(task->output) &&
+             last_seen[match_len] == task->output[match_len]) {
+        match_len++;
+      }
+
+      // Print only the new content
+      if (strlen(task->output) > match_len) {
+        printf("%s", task->output + match_len);
+        fflush(stdout);
+      }
+
+      // Update last seen content
+      strncpy(last_seen, task->output, sizeof(last_seen) - 1);
+    }
+
+    pthread_mutex_unlock(&task->output_mutex);
+
+    // Check task status
+    if (kill(task->pid, 0) != 0) {
+      // Process no longer exists
+      task->is_running = 0;
+      break;
+    }
+
+    // Check for detach signal
+    if (attach_interrupted) {
+      running = 0;
+      attach_interrupted = 0;
+      printf("\nDetached from task %d (process continuing in background)\n",
+             task_id);
+    }
+
+    usleep(100000); // Sleep for 100ms to reduce CPU usage
+  }
+
+  // Restore default signal handler
+  sa.sa_handler = SIG_DFL;
+  sigaction(SIGINT, &sa, NULL);
+
+  set_terminal_canonical_mode();
+
+  if (task->is_running == 0) {
+    printf("\nTask %d has completed\n", task_id);
+  }
+}
+
+typedef struct {
+  char command[MAX_COMMAND_LEN];
+  time_t scheduled_time; // Time at which the command should be executed
+} ScheduledTask;
+
+ScheduledTask scheduled_tasks[MAX_SCHEDULED_TASKS];
+int num_scheduled_tasks = 0;
+
+void schedule_command(const char *command, time_t scheduled_time) {
+  if (num_scheduled_tasks >= MAX_SCHEDULED_TASKS) {
+    printf("Cannot schedule more tasks. Maximum limit reached.\n");
+    return;
+  }
+
+  ScheduledTask *task = &scheduled_tasks[num_scheduled_tasks++];
+  strncpy(task->command, command, MAX_COMMAND_LEN);
+  task->scheduled_time = scheduled_time;
+  printf("Task scheduled: %s\n", command);
+}
+
+void check_scheduled_tasks(char *container_root) {
+  time_t current_time = time(NULL);
+
+  for (int i = 0; i < num_scheduled_tasks; i++) {
+    ScheduledTask *task = &scheduled_tasks[i];
+
+    if (task->scheduled_time <= current_time) {
+      printf("Executing scheduled task: %s\n", task->command);
+      execute_command(task->command, container_root);
+
+      // Remove the task from the list
+      memmove(&scheduled_tasks[i], &scheduled_tasks[i + 1],
+              (num_scheduled_tasks - i - 1) * sizeof(ScheduledTask));
+      num_scheduled_tasks--;
+      i--; // Adjust the index after removal
+    }
+  }
+}
+
+void list_scheduled_tasks() {
+  printf("Scheduled tasks:\n");
+  for (int i = 0; i < num_scheduled_tasks; i++) {
+    ScheduledTask *task = &scheduled_tasks[i];
+    printf("%d. %s\n", i + 1, task->command);
+  }
+}
+
+time_t parse_time(const char *time_str) {
+  struct tm time_struct;
+  char *format;
+
+  format = "%H:%M";
+  if (strptime(time_str, format, &time_struct) != NULL) {
+    return mktime(&time_struct);
+  }
+
+  format = "%Y-%m-%d %H:%M";
+  if (strptime(time_str, format, &time_struct) != NULL) {
+    return mktime(&time_struct);
+  }
+
+  // If none of the formats match, return -1
+  return -1;
 }
 
 void create_isolated_environment(FILE *bin_file, const char *bin_file_path,
@@ -1956,8 +2474,57 @@ void create_isolated_environment(FILE *bin_file, const char *bin_file_path,
         } else if (strcmp(command, "network stop") == 0) {
           stop_network_thread(network_thread, network_thread_active);
         } else if (strcmp(command, "network status") == 0) {
-          printf("Network listener status: %s\n", 
+          printf("Network listener status: %s\n",
                  network_thread_active ? "running" : "stopped");
+        } else if (strncmp(command, "trace ", 6) == 0) {
+          char *cmd = command + 6; // Skip "trace " prefix
+          while (isspace(*cmd))
+            cmd++; // Skip any additional whitespace
+          if (*cmd) {
+            trace_command(cmd, container_root);
+          } else {
+            printf("Usage: trace <command>\n");
+          }
+        } else if (strncmp(command, "proctrace ", 10) == 0) {
+          int process_id;
+          if (sscanf(command + 10, "%d", &process_id) == 1) {
+            // Pass the background_tasks array and MAX_BACKGROUND_TASKS constant
+            trace_background_process(process_id, container_root);
+          } else {
+            printf("Usage: proctrace <process_id>\n");
+          }
+        } else if (strcmp(command, "cps") == 0) {
+          // Live process inspection - like top/htop
+          live_process_inspection(container_root);
+        } else if (strncmp(command, "attach ", 7) == 0) {
+          int task_id;
+          if (sscanf(command + 7, "%d", &task_id) == 1) {
+            attach_to_background_task(task_id);
+          } else {
+            printf("Usage: attach <task_id>\n");
+          }
+        } else if (strncmp(command, "schedule", 8) == 0) {
+          char *cmd = command + 9; // Skip "schedule " prefix
+          while (isspace(*cmd))
+            cmd++; // Skip any additional whitespace
+
+          char *time_str = strtok(cmd, " ");
+          char *event_str = strtok(NULL, " ");
+          char *task_command = strtok(NULL, "");
+
+          if (time_str && event_str && task_command) {
+            time_t scheduled_time = parse_time(time_str);
+
+            if (scheduled_time != -1) {
+              schedule_command(task_command, scheduled_time);
+            } else {
+              printf("Invalid time or event type.\n");
+            }
+          } else {
+            printf("Usage: schedule <time> <event> <command>\n");
+          }
+        } else if (strncmp(command, "lshedule", 6) == 0) {
+          list_scheduled_tasks();
         } else if (strcmp(command, "help") == 0) {
           printf("Commands:\n");
           printf("  exit: Exit the container\n");
@@ -1973,12 +2540,20 @@ void create_isolated_environment(FILE *bin_file, const char *bin_file_path,
           printf("  unpause: Unpause all background tasks\n");
           printf("  wait <task_id>: Wait for a background task to finish\n");
           printf("  ps: List all background tasks\n");
+          printf("  network restart: Restart the network listener\n");
+          printf("  network start: Start the network listener\n");
+          printf("  network stop: Stop the network listener\n");
+          printf("  network status: Check the network listener status\n");
+          printf("  trace <command>: Execute a command with system call "
+                 "tracing\n");
+          printf("  proctrace <process_id>: Trace system calls of a running"
+                 "background process\n");
+          printf("  attach <task_id>: Attach to a background task\n");
+          printf("  schedule <time> <event> <command>: Schedule a command to "
+                 "run at a specific time\n");
+          printf("  lshedule: List scheduled tasks\n");
           printf("  help: Print this help message\n");
           printf(" stop: Stops the container and saves its state\n");
-          printf("  network restart: Restart the network listener\n");
-          printf("  network start: Start the network listener note it is already started by default\n");
-          printf("  network stop: Stop the network listener\n");
-          printf("  network status: Print the status of the network listener\n");
         } else if (strcmp(command, "stop") == 0) {
           printf("Stopping container...\n");
 
@@ -2050,7 +2625,7 @@ exit_loop:
   // Clean up the threads
   pthread_cancel(network_thread);
   pthread_join(network_thread, NULL);
-  
+
   pthread_cancel(logger);
   pthread_join(logger, NULL);
 
@@ -2239,6 +2814,8 @@ void ocreate_isolated_environment(FILE *bin_file, const char *bin_file_path) {
       break;
     }
 
+    check_scheduled_tasks(container_root);
+
     printf("> ");
     fflush(stdout);
 
@@ -2344,6 +2921,55 @@ void ocreate_isolated_environment(FILE *bin_file, const char *bin_file_path) {
           }
         } else if (strcmp(command, "ps") == 0) {
           show_background_tasks();
+        } else if (strncmp(command, "trace ", 6) == 0) {
+          char *cmd = command + 6; // Skip "trace " prefix
+          while (isspace(*cmd))
+            cmd++; // Skip any additional whitespace
+          if (*cmd) {
+            trace_command(cmd, container_root);
+          } else {
+            printf("Usage: trace <command>\n");
+          }
+        } else if (strncmp(command, "proctrace ", 10) == 0) {
+          int process_id;
+          if (sscanf(command + 10, "%d", &process_id) == 1) {
+            // Pass the background_tasks array and MAX_BACKGROUND_TASKS constant
+            trace_background_process(process_id, container_root);
+          } else {
+            printf("Usage: proctrace <process_id>\n");
+          }
+        } else if (strcmp(command, "cps") == 0) {
+          // Live process inspection - like top/htop
+          live_process_inspection(container_root);
+        } else if (strncmp(command, "attach ", 7) == 0) {
+          int task_id;
+          if (sscanf(command + 7, "%d", &task_id) == 1) {
+            attach_to_background_task(task_id);
+          } else {
+            printf("Usage: attach <task_id>\n");
+          }
+        } else if (strncmp(command, "schedule", 8) == 0) {
+          char *cmd = command + 9; // Skip "schedule " prefix
+          while (isspace(*cmd))
+            cmd++; // Skip any additional whitespace
+
+          char *time_str = strtok(cmd, " ");
+          char *event_str = strtok(NULL, " ");
+          char *task_command = strtok(NULL, "");
+
+          if (time_str && event_str && task_command) {
+            time_t scheduled_time = parse_time(time_str);
+
+            if (scheduled_time != -1) {
+              schedule_command(task_command, scheduled_time);
+            } else {
+              printf("Invalid time or event type.\n");
+            }
+          } else {
+            printf("Usage: schedule <time> <event> <command>\n");
+          }
+        } else if (strncmp(command, "lshedule", 6) == 0) {
+          list_scheduled_tasks();
         } else if (strcmp(command, "help") == 0) {
           printf("Commands:\n");
           printf("  exit: Exit the container\n");
@@ -2359,6 +2985,14 @@ void ocreate_isolated_environment(FILE *bin_file, const char *bin_file_path) {
           printf("  unpause: Unpause all background tasks\n");
           printf("  wait <task_id>: Wait for a background task to finish\n");
           printf("  ps: List all background tasks\n");
+          printf("  trace <command>: Execute a command with system call "
+                 "tracing\n");
+          printf("  proctrace <process_id>: Trace system calls of a running "
+                 "background process\n");
+          printf("  attach <task_id>: Attach to a background task\n");
+          printf("  schedule <time> <event> <command>: Schedule a command to "
+                 "run at a specific time\n");
+          printf("  lshedule: List scheduled tasks\n");
           printf("  help: Print this help message\n");
           printf(" stop: Stops the container and saves its state\n");
         } else if (strcmp(command, "stop") == 0) {
@@ -2739,6 +3373,55 @@ void gcreate_isolated_environment(FILE *bin_file, const char *bin_file_path) {
           }
         } else if (strcmp(command, "ps") == 0) {
           show_background_tasks();
+        } else if (strncmp(command, "trace ", 6) == 0) {
+          char *cmd = command + 6; // Skip "trace " prefix
+          while (isspace(*cmd))
+            cmd++; // Skip any additional whitespace
+          if (*cmd) {
+            trace_command(cmd, container_root);
+          } else {
+            printf("Usage: trace <command>\n");
+          }
+        } else if (strncmp(command, "proctrace ", 10) == 0) {
+          int process_id;
+          if (sscanf(command + 10, "%d", &process_id) == 1) {
+            // Pass the background_tasks array and MAX_BACKGROUND_TASKS constant
+            trace_background_process(process_id, container_root);
+          } else {
+            printf("Usage: proctrace <process_id>\n");
+          }
+        } else if (strcmp(command, "cps") == 0) {
+          // Live process inspection - like top/htop
+          live_process_inspection(container_root);
+        } else if (strncmp(command, "attach ", 7) == 0) {
+          int task_id;
+          if (sscanf(command + 7, "%d", &task_id) == 1) {
+            attach_to_background_task(task_id);
+          } else {
+            printf("Usage: attach <task_id>\n");
+          }
+        } else if (strncmp(command, "schedule", 8) == 0) {
+          char *cmd = command + 9; // Skip "schedule " prefix
+          while (isspace(*cmd))
+            cmd++; // Skip any additional whitespace
+
+          char *time_str = strtok(cmd, " ");
+          char *event_str = strtok(NULL, " ");
+          char *task_command = strtok(NULL, "");
+
+          if (time_str && event_str && task_command) {
+            time_t scheduled_time = parse_time(time_str);
+
+            if (scheduled_time != -1) {
+              schedule_command(task_command, scheduled_time);
+            } else {
+              printf("Invalid time or event type.\n");
+            }
+          } else {
+            printf("Usage: schedule <time> <event> <command>\n");
+          }
+        } else if (strncmp(command, "lshedule", 6) == 0) {
+          list_scheduled_tasks();
         } else if (strcmp(command, "help") == 0) {
           printf("Commands:\n");
           printf("  exit: Exit the container\n");
@@ -2754,6 +3437,14 @@ void gcreate_isolated_environment(FILE *bin_file, const char *bin_file_path) {
           printf("  unpause: Unpause all background tasks\n");
           printf("  wait <task_id>: Wait for a background task to finish\n");
           printf("  ps: List all background tasks\n");
+          printf("  trace <command>: Execute a command with system call "
+                 "tracing\n");
+          printf("  proctrace <process_id>: Trace system calls of a running "
+                 "background process\n");
+          printf("  attach <task_id>: Attach to a background task\n");
+          printf("  schedule <time> <event> <command>: Schedule a command to "
+                 "run at a specific time\n");
+          printf("  lshedule: List scheduled tasks\n");
           printf("  help: Print this help message\n");
           printf(" stop: Stops the container and saves its state\n");
         } else if (strcmp(command, "stop") == 0) {
@@ -3881,81 +4572,86 @@ int copy_volume_to_directory(const char *volume_name, const char *target_dir) {
   }
 }
 
-void broadcast_command_to_network(const char* network_name, const char* command, int port) {
+void broadcast_command_to_network(const char *network_name, const char *command,
+                                  int port) {
   ContainerNetwork network = load_container_network(network_name);
   if (network.vlan_id == 0) {
-      fprintf(stderr, "Failed to load network configuration for %s\n", network_name);
-      return;
+    fprintf(stderr, "Failed to load network configuration for %s\n",
+            network_name);
+    return;
   }
 
   // Set up socket options
   int enable_socket_reuse = 1;
-  struct timeval timeout = {
-      .tv_sec = 5,  // 5 seconds timeout
-      .tv_usec = 0
-  };
+  struct timeval timeout = {.tv_sec = 5, // 5 seconds timeout
+                            .tv_usec = 0};
 
   for (int i = 0; i < network.num_containers; i++) {
-      // Create a new socket for each container
-      int broadcast_socket = socket(AF_INET, SOCK_STREAM, 0);
-      if (broadcast_socket < 0) {
-          perror("Socket creation failed");
-          continue;
-      }
+    // Create a new socket for each container
+    int broadcast_socket = socket(AF_INET, SOCK_STREAM, 0);
+    if (broadcast_socket < 0) {
+      perror("Socket creation failed");
+      continue;
+    }
 
-      // Configure socket options
-      setsockopt(broadcast_socket, SOL_SOCKET, SO_REUSEADDR, 
-                 &enable_socket_reuse, sizeof(enable_socket_reuse));
-      setsockopt(broadcast_socket, SOL_SOCKET, SO_RCVTIMEO, 
-                 &timeout, sizeof(timeout));
-      setsockopt(broadcast_socket, SOL_SOCKET, SO_SNDTIMEO, 
-                 &timeout, sizeof(timeout));
+    // Configure socket options
+    setsockopt(broadcast_socket, SOL_SOCKET, SO_REUSEADDR, &enable_socket_reuse,
+               sizeof(enable_socket_reuse));
+    setsockopt(broadcast_socket, SOL_SOCKET, SO_RCVTIMEO, &timeout,
+               sizeof(timeout));
+    setsockopt(broadcast_socket, SOL_SOCKET, SO_SNDTIMEO, &timeout,
+               sizeof(timeout));
 
-      // Set up container address
-      struct sockaddr_in container_addr;
-      memset(&container_addr, 0, sizeof(container_addr));
-      container_addr.sin_family = AF_INET;
-      container_addr.sin_port = htons(port);  // Using the port parameter
+    // Set up container address
+    struct sockaddr_in container_addr;
+    memset(&container_addr, 0, sizeof(container_addr));
+    container_addr.sin_family = AF_INET;
+    container_addr.sin_port = htons(port); // Using the port parameter
 
-      // Convert IP address string to network format
-      if (inet_pton(AF_INET, network.container_ips[i], &container_addr.sin_addr) <= 0) {
-          fprintf(stderr, "Invalid container IP address: %s\n", network.container_ips[i]);
-          close(broadcast_socket);
-          continue;
-      }
-
-      // Try to connect to the container
-      if (connect(broadcast_socket, (struct sockaddr*)&container_addr, 
-                 sizeof(container_addr)) < 0) {
-          fprintf(stderr, "Failed to connect to container %s at %s:%d\n", 
-                  network.container_names[i], network.container_ips[i], port);
-          close(broadcast_socket);
-          continue;
-      }
-
-      // Send the command
-      ssize_t sent_bytes = send(broadcast_socket, command, strlen(command), 0);
-      if (sent_bytes < 0) {
-          fprintf(stderr, "Failed to send command to container %s\n", 
-                  network.container_names[i]);
-      } else {
-          printf("Command sent to container %s at %s:%d (%zd bytes)\n", 
-                 network.container_names[i], network.container_ips[i], port, sent_bytes);
-
-          // Wait for response
-          char response[1024] = {0};
-          ssize_t received_bytes = recv(broadcast_socket, response, sizeof(response)-1, 0);
-          if (received_bytes > 0) {
-              printf("Response from %s (%zd bytes): %s", 
-                     network.container_names[i], received_bytes, response);
-          } else if (received_bytes == 0) {
-              printf("Connection closed by container %s\n", network.container_names[i]);
-          } else {
-              perror("Error receiving response");
-          }
-      }
-
+    // Convert IP address string to network format
+    if (inet_pton(AF_INET, network.container_ips[i],
+                  &container_addr.sin_addr) <= 0) {
+      fprintf(stderr, "Invalid container IP address: %s\n",
+              network.container_ips[i]);
       close(broadcast_socket);
+      continue;
+    }
+
+    // Try to connect to the container
+    if (connect(broadcast_socket, (struct sockaddr *)&container_addr,
+                sizeof(container_addr)) < 0) {
+      fprintf(stderr, "Failed to connect to container %s at %s:%d\n",
+              network.container_names[i], network.container_ips[i], port);
+      close(broadcast_socket);
+      continue;
+    }
+
+    // Send the command
+    ssize_t sent_bytes = send(broadcast_socket, command, strlen(command), 0);
+    if (sent_bytes < 0) {
+      fprintf(stderr, "Failed to send command to container %s\n",
+              network.container_names[i]);
+    } else {
+      printf("Command sent to container %s at %s:%d (%zd bytes)\n",
+             network.container_names[i], network.container_ips[i], port,
+             sent_bytes);
+
+      // Wait for response
+      char response[1024] = {0};
+      ssize_t received_bytes =
+          recv(broadcast_socket, response, sizeof(response) - 1, 0);
+      if (received_bytes > 0) {
+        printf("Response from %s (%zd bytes): %s", network.container_names[i],
+               received_bytes, response);
+      } else if (received_bytes == 0) {
+        printf("Connection closed by container %s\n",
+               network.container_names[i]);
+      } else {
+        perror("Error receiving response");
+      }
+    }
+
+    close(broadcast_socket);
   }
 }
 
@@ -4108,14 +4804,26 @@ int main(int argc, char *argv[]) {
 
     if (strcmp(argv[2], "create") == 0) {
       if (argc < 5) {
-        fprintf(stderr, "Usage: %s -network create <name> <vlan_id>\n",
+        fprintf(stderr,
+                "Usage: %s -network create <name> <vlan_id> [allowed_ip]\n",
                 argv[0]);
         return EXIT_FAILURE;
       }
-      create_and_save_container_network(argv[3], atoi(argv[4]));
+
+      // Check if optional allowed_ip parameter was provided
+      const char *allowed_ip = NULL;
+      if (argc > 5) {
+        allowed_ip = argv[5];
+      }
+
+      create_and_save_container_network(argv[3], atoi(argv[4]), allowed_ip);
       ContainerNetwork network = load_container_network(argv[3]);
       setup_pf_rules(&network);
     } else if (strcmp(argv[2], "remove") == 0) {
+      if (argc < 4) {
+        fprintf(stderr, "Usage: %s -network remove <name>\n", argv[0]);
+        return EXIT_FAILURE;
+      }
       remove_container_network(argv[3]);
     } else {
       fprintf(stderr, "Unknown network command: %s\n", argv[2]);
@@ -4443,7 +5151,8 @@ int main(int argc, char *argv[]) {
   } else if (strcmp(argv[1], "-bcn") == 0) {
     // broadcast_command_to_network
     if (argc != 5) {
-      fprintf(stderr, "Usage: %s -bcn <network_name>, <command>, PORT\n", argv[0]);
+      fprintf(stderr, "Usage: %s -bcn <network_name>, <command>, PORT\n",
+              argv[0]);
       return EXIT_FAILURE;
     }
     broadcast_command_to_network(argv[2], argv[3], atoi(argv[4]));
