@@ -95,7 +95,7 @@ sudo osxiec -contain {directory_path} {some_name}.bin {path_to_config_file_in_di
 
 **Create a cluster ( virtualized network )** create a cluster
 ```sh
-sudo osxiec -network create {network_name} {vlan_id}
+sudo osxiec -network create {network_name} {vlan_id} {optional_ip_adress_to_only_connect_to}
 ```
 **Remove a vlan network** removes a vlan network
 ```sh
@@ -296,9 +296,18 @@ If you want to access the container terminal just press enter.
 11. **pause** pauses all background tasks in the container
 12. **unpause** unpauses all background tasks in the container
 13. **br** runs a command in background
+14 **network start** starts a network listener
+15 **network stop** stops a network listener
+16 **network status** shows the status of a network listener
+17 **network restart** restarts a network listener
+18 **trace** shows the trace of a command
+19 **proctrace** Trace system calls of a running
+20 **attach** Attach to a running background process
+21 **schedule** Schedule a command to run at a specific time
+22 **lschedule** List scheduled commands
 
 ## Creating a vlan network
-To create a network you can run `osxiec -network create {network_name} {vlan_id}`
+To create a network you can run `osxiec -network create {network_name} {vlan_id} {optional_ip_adress_to_only_connect_to}`
 
 The network_name can be any string like "test" for example.
 
