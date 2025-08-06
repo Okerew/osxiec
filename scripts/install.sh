@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Define the version of the installation
-OSXIEC_VERSION="0.91"
+OSXIEC_VERSION="1.0"
 
 # Check if the script is run as root
 if [ "$EUID" -ne 0 ]
