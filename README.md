@@ -9,6 +9,11 @@ If it says that macOS can't identify if it is malware or not, close it go into s
 
 ____
 
+## Maintaince mode
+
+With the realease of version 1.0 I won't update osxiec regularly anymore. I had done all the features I wanted in it, but I will fix bugs or any issues listed in the repo's Issues and if apple breaks stuff that osxiec uses I will update it.
+____
+
 
 ## Dependencies
 **HomeBrew for installing dependencies**
