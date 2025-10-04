@@ -1,8 +1,9 @@
 #ifndef OSXIEC_H
 #define OSXIEC_H
 
-void execute_command(const char *command);
+void execute_command(const char *command, const char *container_root);
 
-void scale_container_resources(int soft_limit, int hard_limit, int cpu_priority);
+void scale_container_resources(int soft_limit, int hard_limit,
+                               int cpu_priority);
 
-#endif //OSXIEC_H
+#endif // OSXIEC_H
