@@ -31,7 +31,7 @@ brew install readline
 
 **Json-c**
 ```sh
-brew install json-c@0.17
+brew install json-c@0.18
 ```
 
 **Xcode**
