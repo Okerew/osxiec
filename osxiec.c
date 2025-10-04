@@ -1,4 +1,4 @@
-#include "/opt/homebrew/Cellar/json-c/0.17/include/json-c/json.h"
+#include "/opt/homebrew/Cellar/json-c/0.18/include/json-c/json.h"
 #include "osxiec_script/osxiec_script.h"
 #include "plugin_manager/plugin_manager.h"
 #include <arpa/inet.h>
@@ -335,33 +335,42 @@ void execute_command(const char *command, const char *container_root) {
   strncpy(container_state.last_executed_command, command, MAX_COMMAND_LEN - 1);
   container_state.last_executed_command[MAX_COMMAND_LEN - 1] = '\0';
 
-  // Update current directory if it's a cd command
   if (strncmp(command, "cd ", 3) == 0) {
     const char *new_dir = command + 3;
-    const char shared_folder_path[] = "/Volumes/SharedContainer";
-    char current_path[PATH_MAX];
-    if (getcwd(current_path, sizeof(current_path)) == NULL) {
-      perror("Failed to get current directory");
-      return;
-    }
-    if (is_subpath(new_dir, container_root) ||
-        is_subpath(new_dir, shared_folder_path) ||
-        (is_subpath(current_path, shared_folder_path) &&
-         strcmp(new_dir, container_root) == 0)) {
+
+    if (container_root != NULL) {
+      const char shared_folder_path[] = "/Volumes/SharedContainer";
+      char current_path[PATH_MAX];
+      if (getcwd(current_path, sizeof(current_path)) == NULL) {
+        perror("Failed to get current directory");
+        return;
+      }
+      if (is_subpath(new_dir, container_root) ||
+          is_subpath(new_dir, shared_folder_path) ||
+          (is_subpath(current_path, shared_folder_path) &&
+           strcmp(new_dir, container_root) == 0)) {
+        if (chdir(new_dir) == 0) {
+          getcwd(container_state.current_directory, MAX_PATH_LEN);
+          printf("Changed directory to: %s\n",
+                 container_state.current_directory);
+        } else {
+          perror("Failed to change directory");
+        }
+      } else {
+        fprintf(stderr, "Error: Cannot change directory outside of the "
+                        "container or shared folder.\n");
+      }
+    } else {
       if (chdir(new_dir) == 0) {
         getcwd(container_state.current_directory, MAX_PATH_LEN);
         printf("Changed directory to: %s\n", container_state.current_directory);
       } else {
         perror("Failed to change directory");
       }
-    } else {
-      fprintf(stderr, "Error: Cannot change directory outside of the container "
-                      "or shared folder.\n");
     }
     return;
   }
 
-  // Parse command into arguments
   char *args[MAX_COMMAND_LEN / 2 + 1];
   char *command_copy = strdup(command);
   if (command_copy == NULL) {
@@ -395,70 +404,65 @@ void execute_command(const char *command, const char *container_root) {
     return;
   }
 
-  // Create enhanced environment for root illusion
   extern char **environ;
-  char *new_environ[1024];
+  char **new_environ = environ;
+  char *custom_environ[1024];
   int env_count = 0;
 
-  // Copy existing environment, filtering out problematic variables
-  for (char **env = environ; *env && env_count < 1000; env++) {
-    // Skip variables that might reveal the real filesystem structure
-    if (strncmp(*env, "PWD=", 4) != 0 && strncmp(*env, "HOME=", 5) != 0 &&
-        strncmp(*env, "OLDPWD=", 7) != 0 && strncmp(*env, "TMPDIR=", 7) != 0) {
-      new_environ[env_count++] = *env;
-    }
-  }
-
-  // Add container-specific environment variables
-  static char pwd_env[MAX_PATH_LEN + 4];
-  static char home_env[MAX_PATH_LEN + 5];
-  static char root_env[MAX_PATH_LEN + 15];
-  static char tmpdir_env[MAX_PATH_LEN + 8];
-  static char oldpwd_env[MAX_PATH_LEN + 8];
-  static char path_env[MAX_PATH_LEN * 2];
-  static char dyld_env[MAX_PATH_LEN + 30];
-
-  // Calculate relative path from container_root for PWD
-  char current_dir[PATH_MAX];
-  if (getcwd(current_dir, sizeof(current_dir)) != NULL) {
-    if (strncmp(current_dir, container_root, strlen(container_root)) == 0) {
-      const char *relative_path = current_dir + strlen(container_root);
-      if (strlen(relative_path) == 0) {
-        relative_path = "/";
+  if (container_root != NULL) {
+    for (char **env = environ; *env && env_count < 1000; env++) {
+      if (strncmp(*env, "PWD=", 4) != 0 && strncmp(*env, "HOME=", 5) != 0 &&
+          strncmp(*env, "OLDPWD=", 7) != 0 &&
+          strncmp(*env, "TMPDIR=", 7) != 0) {
+        custom_environ[env_count++] = *env;
       }
-      snprintf(pwd_env, sizeof(pwd_env), "PWD=%s", relative_path);
+    }
+
+    static char pwd_env[MAX_PATH_LEN + 4];
+    static char home_env[MAX_PATH_LEN + 5];
+    static char root_env[MAX_PATH_LEN + 15];
+    static char tmpdir_env[MAX_PATH_LEN + 8];
+    static char oldpwd_env[MAX_PATH_LEN + 8];
+    static char path_env[MAX_PATH_LEN * 2];
+
+    char current_dir[PATH_MAX];
+    if (getcwd(current_dir, sizeof(current_dir)) != NULL) {
+      if (strncmp(current_dir, container_root, strlen(container_root)) == 0) {
+        const char *relative_path = current_dir + strlen(container_root);
+        if (strlen(relative_path) == 0) {
+          relative_path = "/";
+        }
+        snprintf(pwd_env, sizeof(pwd_env), "PWD=%s", relative_path);
+      } else {
+        snprintf(pwd_env, sizeof(pwd_env), "PWD=/");
+      }
     } else {
       snprintf(pwd_env, sizeof(pwd_env), "PWD=/");
     }
-  } else {
-    snprintf(pwd_env, sizeof(pwd_env), "PWD=/");
+
+    snprintf(home_env, sizeof(home_env), "HOME=/root");
+    snprintf(root_env, sizeof(root_env), "CONTAINER_ROOT=%s", container_root);
+    snprintf(tmpdir_env, sizeof(tmpdir_env), "TMPDIR=/tmp");
+    snprintf(oldpwd_env, sizeof(oldpwd_env), "OLDPWD=/");
+    snprintf(path_env, sizeof(path_env),
+             "PATH=/bin:/usr/bin:/usr/local/bin:/sbin:/usr/sbin:"
+             "/opt/homebrew/bin");
+
+    custom_environ[env_count++] = pwd_env;
+    custom_environ[env_count++] = home_env;
+    custom_environ[env_count++] = root_env;
+    custom_environ[env_count++] = tmpdir_env;
+    custom_environ[env_count++] = oldpwd_env;
+    custom_environ[env_count++] = path_env;
+    custom_environ[env_count] = NULL;
+
+    new_environ = custom_environ;
   }
-
-  snprintf(home_env, sizeof(home_env), "HOME=/root");
-  snprintf(root_env, sizeof(root_env), "CONTAINER_ROOT=%s", container_root);
-  snprintf(tmpdir_env, sizeof(tmpdir_env), "TMPDIR=/tmp");
-  snprintf(oldpwd_env, sizeof(oldpwd_env), "OLDPWD=/");
-
-  // Set up a container-relative PATH
-  snprintf(
-      path_env, sizeof(path_env),
-      "PATH=/bin:/usr/bin:/usr/local/bin:/sbin:/usr/sbin:/opt/homebrew/bin");
-
-  new_environ[env_count++] = pwd_env;
-  new_environ[env_count++] = home_env;
-  new_environ[env_count++] = root_env;
-  new_environ[env_count++] = tmpdir_env;
-  new_environ[env_count++] = oldpwd_env;
-  new_environ[env_count++] = path_env;
-
-  new_environ[env_count] = NULL;
 
   char *executable_path = args[0];
   char translated_executable[MAX_PATH_LEN];
 
-  // Check if the command exists in the container first
-  if (args[0][0] != '/' && args[0][0] != '.') {
-    // For relative commands, try to find them in container paths first
+  if (container_root != NULL && args[0][0] != '/' && args[0][0] != '.') {
     const char *search_paths[] = {"/bin",  "/usr/bin",  "/usr/local/bin",
                                   "/sbin", "/usr/sbin", "/opt/homebrew/bin"};
 
@@ -472,7 +476,6 @@ void execute_command(const char *command, const char *container_root) {
     }
   }
 
-  // Set working directory to appear as if we're at container root
   char original_cwd[PATH_MAX];
   getcwd(original_cwd, sizeof(original_cwd));
 
@@ -6659,7 +6662,7 @@ int main(int argc, char *argv[]) {
     }
   } else if (strcmp(argv[1], "-api") == 0) {
     if (strcmp(argv[2], "execute_command") == 0) {
-      execute_command(argv[3], argv[4]);
+      execute_command(argv[3], NULL);
     } else if (strcmp(argv[2], "copy_file") == 0) {
       copy_file(argv[3], argv[4], argv[5]);
     } else if (strcmp(argv[2], "execute_script_file") == 0) {
