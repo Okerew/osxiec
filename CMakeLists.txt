@@ -38,10 +38,9 @@ target_link_libraries(osxiec PRIVATE readline)
 target_link_libraries(osxiec_shared PRIVATE readline)
 
 # Find and link json-c
-include_directories(/opt/homebrew/Cellar/json-c/0.17/include)
-target_link_directories(osxiec PRIVATE /opt/homebrew/Cellar/json-c/0.17/lib)
-target_link_directories(osxiec_shared PRIVATE /opt/homebrew/Cellar/json-c/0.17/lib)
+include_directories(/opt/homebrew/Cellar/json-c/0.18/include)
+target_link_directories(osxiec PRIVATE /opt/homebrew/Cellar/json-c/0.18/lib)
+target_link_directories(osxiec_shared PRIVATE /opt/homebrew/Cellar/json-c/0.18/lib)
 
 target_link_libraries(osxiec PRIVATE json-c)
 target_link_libraries(osxiec_shared PRIVATE json-c)
-
