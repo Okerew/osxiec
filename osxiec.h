@@ -88,7 +88,6 @@ void start_network_listener(const char *container_root);
 void create_isolated_environment(FILE *bin_file, const char *bin_file_path,
                                  ContainerNetwork *network);
 void ocreate_isolated_environment(FILE *bin_file, const char *bin_file_path);
-void gcreate_isolated_environment(FILE *bin_file, const char *bin_file_path);
 static size_t WriteMemoryCallback(void *contents, size_t size, size_t nmemb,
                                   void *userp);
 void search(const char *term);
