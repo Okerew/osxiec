@@ -5974,18 +5974,12 @@ int main(int argc, char *argv[]) {
     printf("Starts a stopped container");
     printf(" -ostart <container_file>\n");
     printf("Starts a stopped container in offline mode");
-    printf(" -gstart <container_file> <network_name>\n");
-    printf("Starts a gui stopped container");
     printf("  -network <create|remove> <name> [vlan_id>\n");
     printf("Manages the vlan network\n");
     printf("  -run <container_file> <network_name> [-port <port>]\n");
     printf("Runs a container file\n");
     printf(" -oexec <container_file>\n");
     printf("Executes a container file in offline mode\n");
-    printf(" -gexec <container_file>\n");
-    printf("Executes a container file wile allowing gui applications (note "
-           "this is doesn't support online mode and has far limited isolation "
-           "compared to other modes)\n");
     printf("  -pull <file_name>\n");
     printf("Pulls a container from Osxiec Hub\n");
     printf("  -search <search_term>\n");
