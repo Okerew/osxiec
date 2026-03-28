@@ -3,6 +3,10 @@ project(osxiec C)
 
 set(CMAKE_C_STANDARD 11)
 
+# Enable optimizations
+set(CMAKE_C_FLAGS_RELEASE "-O2 -Wall -Wextra")
+set(CMAKE_BUILD_TYPE Release)  # default to Release build
+
 # List shared sources
 set(OSXIEC_SOURCES
     osxiec.c
@@ -18,7 +22,6 @@ set(OSXIEC_SOURCES
 add_library(osxiec_shared SHARED
     ${OSXIEC_SOURCES}
 )
-
 set_target_properties(osxiec_shared PROPERTIES OUTPUT_NAME "osxiec")
 
 # Build executable
@@ -33,7 +36,6 @@ target_link_libraries(osxiec_shared PRIVATE CURL::libcurl)
 include_directories(/opt/homebrew/opt/readline/include)
 target_link_directories(osxiec PRIVATE /opt/homebrew/opt/readline/lib)
 target_link_directories(osxiec_shared PRIVATE /opt/homebrew/opt/readline/lib)
-
 target_link_libraries(osxiec PRIVATE readline)
 target_link_libraries(osxiec_shared PRIVATE readline)
 
@@ -41,6 +43,5 @@ target_link_libraries(osxiec_shared PRIVATE readline)
 include_directories(/opt/homebrew/Cellar/json-c/0.18/include)
 target_link_directories(osxiec PRIVATE /opt/homebrew/Cellar/json-c/0.18/lib)
 target_link_directories(osxiec_shared PRIVATE /opt/homebrew/Cellar/json-c/0.18/lib)
-
 target_link_libraries(osxiec PRIVATE json-c)
 target_link_libraries(osxiec_shared PRIVATE json-c)
