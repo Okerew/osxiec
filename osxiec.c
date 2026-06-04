@@ -1,4 +1,4 @@
-#include "/opt/homebrew/Cellar/json-c/0.18/include/json-c/json.h"
+#include <json-c/json.h>
 #include "osxiec_script/osxiec_script.h"
 #include "plugin_manager/plugin_manager.h"
 #include <arpa/inet.h>
