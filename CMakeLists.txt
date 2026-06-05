@@ -2,12 +2,9 @@ cmake_minimum_required(VERSION 3.27)
 project(osxiec C)
 
 set(CMAKE_C_STANDARD 11)
-
-# Enable optimizations
 set(CMAKE_C_FLAGS_RELEASE "-O2 -Wall -Wextra")
-set(CMAKE_BUILD_TYPE Release)  # default to Release build
+set(CMAKE_BUILD_TYPE Release)
 
-# List shared sources
 set(OSXIEC_SOURCES
     osxiec.c
     plugin_manager/plugin.h
@@ -18,30 +15,47 @@ set(OSXIEC_SOURCES
     api_for_osxiec_script.h
 )
 
-# Build shared library (.dylib)
-add_library(osxiec_shared SHARED
-    ${OSXIEC_SOURCES}
+set(EXECUTABLE_SOURCES
+    osxiec.c
 )
-set_target_properties(osxiec_shared PROPERTIES OUTPUT_NAME "osxiec")
 
-# Build executable
-add_executable(osxiec ${OSXIEC_SOURCES})
-
-# Find and link CURL
 find_package(CURL REQUIRED)
-target_link_libraries(osxiec PRIVATE CURL::libcurl)
-target_link_libraries(osxiec_shared PRIVATE CURL::libcurl)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(JSONC REQUIRED IMPORTED_TARGET json-c)
+pkg_check_modules(READLINE IMPORTED_TARGET readline)
 
-# Find and link Readline
-include_directories(/opt/homebrew/opt/readline/include)
-target_link_directories(osxiec PRIVATE /opt/homebrew/opt/readline/lib)
-target_link_directories(osxiec_shared PRIVATE /opt/homebrew/opt/readline/lib)
-target_link_libraries(osxiec PRIVATE readline)
-target_link_libraries(osxiec_shared PRIVATE readline)
+if(NOT READLINE_FOUND)
+  if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+    include_directories(
+        /usr/local/Cellar/readline/include
+    )
+    link_directories(/usr/local/Cellar/readline/lib)
+  else()
+    include_directories(
+        /opt/homebrew/opt/readline/include
+    )
+    link_directories(/opt/homebrew/opt/readline/lib)
+  endif()
+  set(READLINE_LIB readline)
+else()
+  set(READLINE_LIB PkgConfig::READLINE)
+endif()
 
-# Find and link json-c
-include_directories(/opt/homebrew/Cellar/json-c/0.18/include)
-target_link_directories(osxiec PRIVATE /opt/homebrew/Cellar/json-c/0.18/lib)
-target_link_directories(osxiec_shared PRIVATE /opt/homebrew/Cellar/json-c/0.18/lib)
-target_link_libraries(osxiec PRIVATE json-c)
-target_link_libraries(osxiec_shared PRIVATE json-c)
+add_library(osxiec_shared SHARED ${OSXIEC_SOURCES})
+set_target_properties(osxiec_shared PROPERTIES
+    OUTPUT_NAME "osxiec"
+)
+
+target_link_libraries(osxiec_shared PRIVATE
+    PkgConfig::JSONC
+    CURL::libcurl
+    ${READLINE_LIB}
+)
+
+add_executable(osxiec ${EXECUTABLE_SOURCES})
+target_link_libraries(osxiec PRIVATE
+    osxiec_shared
+    PkgConfig::JSONC
+    CURL::libcurl
+    ${READLINE_LIB}
+)

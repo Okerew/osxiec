@@ -50,18 +50,9 @@ brew install cmake
 
 **Quick way with command line**
 
-Arm architecture
 ```sh
-curl -L -o osxiec_cli.tar.gz https://github.com/Okerew/osxiec/releases/download/%s/osxiec_cli.tar.gz && tar -xvzf osxiec_cli.tar.gz && cd osxiec_cli && sudo sh install.sh
+git clone https://github.com/Okerew/osxiec.git && cd osxiec && sudo sh install.sh
 ```
-replace %s with the latest version
-______
-
-86_64 architecture
-```sh
-curl -L -o osxiec_cli_86_64.tar.gz https://github.com/Okerew/osxiec/releases/download/%s/osxiec_cli_86_64.tar.gz && tar -xvzf osxiec_cli_86_64.tar.gz && cd osxiec_cli_86_64 && sudo sh install.sh
-```
-replace %s with the latest version
 ____
 Gui
 ```sh
@@ -71,7 +62,7 @@ replace %s with the latest version
 
 ______
 1. **Download the Release**:
-   Download the `osxiec_cli.tar.gz` and `osxiec_gui.tar.gz` if you want a gui app file from the releases section.
+   Download the `osxiec_gui.tar.gz` if you want a gui app file from the releases section.
 2. **Extract the Archive**:
    ```sh
    tar -xvzf osxiec_cli.tar.gz
