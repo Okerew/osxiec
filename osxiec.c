@@ -1,4 +1,3 @@
-#include <json-c/json.h>
 #include "osxiec_script/osxiec_script.h"
 #include "plugin_manager/plugin_manager.h"
 #include <arpa/inet.h>
@@ -6,6 +5,7 @@
 #include <curl/curl.h>
 #include <dirent.h>
 #include <errno.h>
+#include <json-c/json.h>
 #include <libgen.h>
 #include <mach-o/dyld.h>
 #include <mach/mach.h>
@@ -6070,45 +6070,30 @@ int main(int argc, char *argv[]) {
       if (comparison < 0) {
         printf("An update is available. Latest version: %s\n", latest_version);
         printf("Your current version: %s\n", VERSION);
-        if (strcmp(OSXIEC_ARCHITECTURE, "arm64") == 0) {
-          char update_command[MAX_COMMAND_LEN];
-          sprintf(update_command,
-                  "curl -L -o osxiec_cli.tar.gz "
-                  "https://github.com/Okerew/osxiec/releases/download/%s/"
-                  "osxiec_cli.tar.gz",
-                  latest_version);
-          system(update_command);
-          system("tar -xvzf osxiec_cli.tar.gz");
-          const char *path = "osxiec_cli";
-
-          if (chdir(path) != 0) {
-            perror("chdir() to 'osxiec_cli' failed");
+        char clone_command[MAX_COMMAND_LEN];
+        sprintf(clone_command,
+                "git clone --depth 1 --branch %s "
+                "https://github.com/Okerew/osxiec.git "
+                "osxiec_update",
+                latest_version);
+        if (system(clone_command) == 0) {
+          if (chdir("osxiec_update") != 0) {
+            perror("chdir() to 'osxiec_update' failed");
+            system("rm -rf osxiec_update");
+            free(latest_version);
             return 1;
           }
-
-          system("sudo sh install.sh");
-        }
-        if (strcmp(OSXIEC_ARCHITECTURE, "86_64") == 0) {
-          char update_command[MAX_COMMAND_LEN];
-          sprintf(update_command,
-                  "curl -L -o osxiec_cli_86_64.tar.gz "
-                  "https://github.com/Okerew/osxiec/releases/download/%s/"
-                  "osxiec_cli.tar.gz",
-                  latest_version);
-          system(update_command);
-          system("tar -xvzf osxiec_cli_86_64.tar.gz");
-          const char *path = "osxiec_cli_86_64";
-
-          if (chdir(path) != 0) {
-            perror("chdir() to 'osxiec_cli' failed");
-            return 1;
+          if (system("sudo sh install.sh") == 0) {
+            printf("Update successful. Please restart osxiec.\n");
+            chdir("..");
+            system("rm -rf osxiec_update");
+          } else {
+            printf("Installation failed.\n");
+            chdir("..");
+            system("rm -rf osxiec_update");
           }
-
-          system("sudo sh install.sh");
         } else {
-          printf("There was some error while updating. Please visit "
-                 "https://github.com/Okerew/osxiec/releases/latest to "
-                 "update.\n");
+          printf("There was some error while updating. \n");
         }
       } else if (comparison == 0) {
         printf("You are running the latest version (%s).\n", VERSION);
