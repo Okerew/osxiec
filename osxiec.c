@@ -22,7 +22,6 @@
 #include <termios.h>
 #include <unistd.h>
 
-#define OSXIEC_ARCHITECTURE "arm64"
 #define MAX_COMMAND_LEN 1024
 #define MAX_PATH_LEN 256
 #define MAX_FILE_SIZE 1024 * 1024 * 1024 // 1 GB
@@ -822,11 +821,11 @@ void read_config_file(const char *filename, ContainerConfig *config) {
 }
 
 const char *get_homebrew_prefix() {
-  if (strcmp(OSXIEC_ARCHITECTURE, "arm64") == 0) {
-    return "/opt/homebrew";
-  } else {
-    return "/usr/local";
-  }
+#if defined(__APPLE__) && defined(__aarch64__)
+  return "/opt/homebrew";
+#else
+  return "/usr/local";
+#endif
 }
 
 int get_brew_info(const char *package_name, BrewInfo *info) {
