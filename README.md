@@ -9,12 +9,6 @@ If it says that macOS can't identify if it is malware or not, close it go into s
 
 ____
 
-## Maintaince mode
-
-With the realease of version 1.0 I won't update osxiec regularly anymore. I had done all the features I wanted in it, but I will fix bugs or any issues listed in the repo's Issues and if apple breaks stuff that osxiec uses I will update it.
-____
-
-
 ## Dependencies
 **HomeBrew for installing dependencies**
 ```sh
@@ -189,10 +183,6 @@ sudo osxiec -ostart {volume_name}
 **Gstart** starts a container a stopped container in gui mode
 ```sh
 sudo osxiec -gstart {volume_name}
-```
-**Api** an api that exposes some more functions of the cli
-```sh
-osxiec -api {argument}
 ```
 
 **Update** updates configuration of a container
@@ -608,5 +598,3 @@ After this on the execution of osxiec command the plugin will be loaded.
   Chroot requires for SIP to be disabled, which causes many security risks, chroot can be easily exited by any process, using the normal macOS restrictions is way more secure, reliable,
   having it disabled causes many permission issues.
 - **Sandbox deprecation error** yes I know that sandbox innit is deprecated but there isn't really an alternative for it unless I would use xcode and there is no way I am using it to rebuild this.
-
-- **If you want to remove ips from the network do it by editing the file in private/etc/network_{network_name}.conf file**

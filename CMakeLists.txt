@@ -5,8 +5,17 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_FLAGS_RELEASE "-O2 -Wall -Wextra")
 set(CMAKE_BUILD_TYPE Release)
 
-set(OSXIEC_SOURCES
-    osxiec.c
+set(OSXIEC_MODULE_SOURCES
+    globals/globals.c
+    container.c
+    network.c
+    exec.c
+    reaper.c
+    terminal.c
+    deps.c
+    util.c
+    log/log.c
+    log/log.h
     plugin_manager/plugin.h
     plugin_manager/plugin_manager.h
     plugin_manager/plugin_manager.c
@@ -16,7 +25,7 @@ set(OSXIEC_SOURCES
 )
 
 set(EXECUTABLE_SOURCES
-    osxiec.c
+    main.c
 )
 
 find_package(CURL REQUIRED)
@@ -41,7 +50,7 @@ else()
   set(READLINE_LIB PkgConfig::READLINE)
 endif()
 
-add_library(osxiec_shared SHARED ${OSXIEC_SOURCES})
+add_library(osxiec_shared SHARED ${OSXIEC_MODULE_SOURCES})
 set_target_properties(osxiec_shared PROPERTIES
     OUTPUT_NAME "osxiec"
 )
@@ -59,3 +68,15 @@ target_link_libraries(osxiec PRIVATE
     CURL::libcurl
     ${READLINE_LIB}
 )
+
+set_target_properties(osxiec PROPERTIES
+    BUILD_RPATH "${CMAKE_BINARY_DIR}"
+    INSTALL_RPATH "${CMAKE_INSTALL_PREFIX}/lib"
+)
+
+install(TARGETS osxiec_shared osxiec
+    RUNTIME DESTINATION bin
+    LIBRARY DESTINATION lib
+)
+
+install(DIRECTORY include/ DESTINATION include/osxiec)
