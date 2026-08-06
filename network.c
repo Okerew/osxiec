@@ -243,25 +243,59 @@ static void ensure_osxiec_pf_anchors(void) {
   fclose(out);
 }
 
-void setup_pf_rules(ContainerNetwork *network) {
-  char *ip_address = get_ip_address();
-  if (ip_address == NULL) {
-    fprintf(stderr, "Failed to get IP address\n");
+// Resolve the active interface for the default route; falls back to "en0" on
+// any failure so behaviour on single-interface hosts is unchanged.
+static int get_default_interface(char *buf, size_t len) {
+  snprintf(buf, len, "en0");
+  FILE *pipe = popen("route get default 2>/dev/null", "r");
+  if (pipe == NULL) {
+    return -1;
+  }
+  char line[256];
+  while (fgets(line, sizeof(line), pipe)) {
+    if (sscanf(line, " interface: %63s", buf) == 1) {
+      pclose(pipe);
+      return 0;
+    }
+  }
+  pclose(pipe);
+  return -1;
+}
+
+// Make sure the network's bridge interface exists. Bridges need no physical
+// parent, so there is nothing to heal here - we only create when missing.
+static void ensure_vlan_interface(int net_id) {
+  char cmd[256];
+  snprintf(cmd, sizeof(cmd), "ifconfig bridge%d >/dev/null 2>&1",
+           OSXIEC_BRIDGE_BASE + net_id);
+  if (system(cmd) == 0) {
     return;
   }
+  snprintf(cmd, sizeof(cmd), "ifconfig bridge%d create",
+           OSXIEC_BRIDGE_BASE + net_id);
+  if (system(cmd) != 0) {
+    fprintf(stderr, "Failed to create bridge%d\n", OSXIEC_BRIDGE_BASE + net_id);
+  }
+}
 
-  // Create the VLAN interface only if it does not already exist (avoids the
-  // "SIOCSETVLAN: Resource busy" error on re-runs), then always (re)assign its
-  // address as a separate step.
+void setup_pf_rules(ContainerNetwork *network) {
+  char default_iface[64];
+  get_default_interface(default_iface, sizeof(default_iface));
+
+  // The bridge must exist before any address is assigned to it - assigning
+  // first would auto-clone an address-less interface and the address would be
+  // lost again on recreation.
+  ensure_vlan_interface(network->vlan_id);
+
+  // Give the bridge a stable gateway address (the host LAN IP was assigned
+  // here before, which clobbered the NAT source).
   char ip_cmd[256];
-  snprintf(ip_cmd, sizeof(ip_cmd),
-           "ifconfig vlan%d >/dev/null 2>&1 || "
-           "ifconfig vlan%d create vlan %d vlandev en0",
-           network->vlan_id, network->vlan_id, network->vlan_id);
-  system(ip_cmd);
-  snprintf(ip_cmd, sizeof(ip_cmd), "ifconfig vlan%d inet %s/24 up",
-           network->vlan_id, ip_address);
-  system(ip_cmd);
+  snprintf(ip_cmd, sizeof(ip_cmd), "ifconfig bridge%d inet 192.168.%d.1/24 up",
+           OSXIEC_BRIDGE_BASE + network->vlan_id, network->vlan_id);
+  if (system(ip_cmd) != 0) {
+    fprintf(stderr, "Failed to assign gateway address on bridge%d\n",
+            OSXIEC_BRIDGE_BASE + network->vlan_id);
+  }
 
   // Write this VLAN's ruleset. It is internally correctly ordered (translation
   // before filtering) and is loaded into its own sub-anchor, so it never
@@ -273,17 +307,18 @@ void setup_pf_rules(ContainerNetwork *network) {
   FILE *vlan_pf_conf = fopen(vlan_rules_file, "w");
   if (vlan_pf_conf == NULL) {
     perror("Failed to create VLAN rules file");
-    free(ip_address);
     return;
   }
   fprintf(vlan_pf_conf,
           "# osxiec VLAN %d rules\n"
-          "nat on en0 from %s/24 to any -> (en0)\n"
-          "pass on vlan%d all\n"
-          "pass in on vlan%d all\n"
-          "pass out on vlan%d all\n",
-          network->vlan_id, ip_address, network->vlan_id, network->vlan_id,
-          network->vlan_id);
+          "nat on %s from 192.168.%d.0/24 to any -> (%s)\n"
+          "pass on bridge%d all\n"
+          "pass in on bridge%d all\n"
+          "pass out on bridge%d all\n",
+          network->vlan_id, default_iface, network->vlan_id, default_iface,
+          OSXIEC_BRIDGE_BASE + network->vlan_id,
+          OSXIEC_BRIDGE_BASE + network->vlan_id,
+          OSXIEC_BRIDGE_BASE + network->vlan_id);
   fclose(vlan_pf_conf);
 
   // Reference the osxiec anchors from the main ruleset.
@@ -297,25 +332,23 @@ void setup_pf_rules(ContainerNetwork *network) {
   char cmd[256];
   if (system("pfctl -nf /etc/pf.conf") != 0) {
     fprintf(stderr, "pf: /etc/pf.conf failed validation; not reloading\n");
-    free(ip_address);
     return;
   }
   snprintf(cmd, sizeof(cmd), "pfctl -a %s -nf %s", anchor, vlan_rules_file);
   if (system(cmd) != 0) {
     fprintf(stderr, "pf: VLAN %d ruleset failed validation; not loaded\n",
             network->vlan_id);
-    free(ip_address);
     return;
   }
 
   // Reload the main ruleset (to pick up the anchor references), load this
-  // VLAN's rules into its sub-anchor, and enable pf.
+  // VLAN's rules into its sub-anchor, and enable pf. IP forwarding must be on
+  // or NAT'd container traffic is dropped by the kernel.
+  system("sysctl -w net.inet.ip.forwarding=1");
   system("pfctl -f /etc/pf.conf");
   snprintf(cmd, sizeof(cmd), "pfctl -a %s -f %s", anchor, vlan_rules_file);
   system(cmd);
   system("pfctl -e 2>/dev/null");
-
-  free(ip_address);
 }
 
 void setup_network_isolation(ContainerConfig *config,
@@ -332,19 +365,18 @@ void setup_network_isolation(ContainerConfig *config,
     printf("Setting up bridge network. Container %s on VLAN %d with IP %s\n",
            config->name, config->vlan_id, container_ip);
 
-    // Create the VLAN interface only if it does not already exist (avoids the
-    // "SIOCSETVLAN: Resource busy" error when the interface is left over from a
-    // previous run), then always (re)assign its address as a separate step.
+    // The bridge is created by setup_pf_rules; just add this container's IP
+    // as a /32 alias on top of the .1 gateway address.
+    ensure_vlan_interface(config->vlan_id);
+
     char vlan_cmd[256];
     snprintf(vlan_cmd, sizeof(vlan_cmd),
-             "ifconfig vlan%d >/dev/null 2>&1 || "
-             "ifconfig vlan%d create vlan %d vlandev en0",
-             config->vlan_id, config->vlan_id, config->vlan_id);
-    system(vlan_cmd);
-
-    snprintf(vlan_cmd, sizeof(vlan_cmd), "ifconfig vlan%d inet %s/24 up",
-             config->vlan_id, container_ip);
-    system(vlan_cmd);
+             "ifconfig bridge%d inet %s netmask 255.255.255.255 alias",
+             OSXIEC_BRIDGE_BASE + config->vlan_id, container_ip);
+    if (system(vlan_cmd) != 0) {
+      fprintf(stderr, "Failed to add %s to bridge%d\n", container_ip,
+              OSXIEC_BRIDGE_BASE + config->vlan_id);
+    }
   } else if (strcmp(config->network_mode, "host") == 0) {
     printf("Using host network mode\n");
   } else if (strcmp(config->network_mode, "none") == 0) {
@@ -563,6 +595,11 @@ void remove_pf_configs(int vlan_number) {
   char cmd[128];
   snprintf(cmd, sizeof(cmd), "pfctl -a osxiec/vlan%d -F all 2>/dev/null",
            vlan_number);
+  system(cmd);
+
+  // Tear down the bridge interface carrying this network's subnet.
+  snprintf(cmd, sizeof(cmd), "ifconfig bridge%d destroy 2>/dev/null",
+           OSXIEC_BRIDGE_BASE + vlan_number);
   system(cmd);
 
   // Remove this VLAN's ruleset file.
