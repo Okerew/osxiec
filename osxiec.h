@@ -18,7 +18,7 @@
 #define MAX_VAR_LEN 1024
 #define MAX_COMMAND_LEN 1024
 #define MAX_DEPS 256
-#define VERSION "v1.1"
+#define VERSION "v1.1.1"
 
 typedef struct {
   char name[MAX_PATH_LEN];
