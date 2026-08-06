@@ -136,6 +136,20 @@ int main(int argc, char *argv[]) {
         allowed_ip = argv[5];
       }
 
+      // If a network with this name already exists on a different id, clean
+      // up its old artifacts first so they don't get orphaned.
+      char conf_path[MAX_PATH_LEN];
+      snprintf(conf_path, sizeof(conf_path), "/tmp/network_%s.conf", argv[3]);
+      if (access(conf_path, F_OK) == 0) {
+        ContainerNetwork old = load_container_network(argv[3]);
+        if (old.vlan_id != 0 && old.vlan_id != atoi(argv[4])) {
+          printf("Network %s already exists on VLAN %d, cleaning it up "
+                 "first\n",
+                 argv[3], old.vlan_id);
+          remove_pf_configs(old.vlan_id);
+        }
+      }
+
       create_and_save_container_network(argv[3], atoi(argv[4]), allowed_ip);
       ContainerNetwork network = load_container_network(argv[3]);
       setup_pf_rules(&network);
@@ -143,6 +157,16 @@ int main(int argc, char *argv[]) {
       if (argc < 4) {
         fprintf(stderr, "Usage: %s -network remove <name>\n", argv[0]);
         return EXIT_FAILURE;
+      }
+      // Read the VLAN id before the conf file is deleted, then flush its pf
+      // anchor and tear down the interface so re-runs start clean.
+      ContainerNetwork network = load_container_network(argv[3]);
+      if (network.vlan_id != 0) {
+        remove_pf_configs(network.vlan_id);
+        char cmd[128];
+        snprintf(cmd, sizeof(cmd), "ifconfig bridge%d destroy 2>/dev/null",
+                 OSXIEC_BRIDGE_BASE + network.vlan_id);
+        system(cmd);
       }
       remove_container_network(argv[3]);
     } else {

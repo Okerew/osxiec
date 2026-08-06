@@ -9,6 +9,12 @@
 
 #define MAX_PATH_LEN 256
 #define MAX_SECRETS 64
+
+/* Per-network bridge interfaces are named bridge(OSXIEC_BRIDGE_BASE + id) so
+ * they never clash with the system Thunderbolt bridge0. 802.1Q vlan
+ * interfaces can't bind to Wi-Fi on macOS (SIOCSETVLAN is silently ignored),
+ * so bridges carry the container subnet instead. */
+#define OSXIEC_BRIDGE_BASE 1000
 #define MAX_VAR_LEN 1024
 #define MAX_COMMAND_LEN 1024
 #define MAX_DEPS 256

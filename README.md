@@ -297,7 +297,7 @@ To create a network you can run `osxiec -network create {network_name} {vlan_id}
 
 The network_name can be any string like "test" for example.
 
-The vlan id can be any number from 1-4094.
+The vlan id can be any number up to 255.
 
 For example `osxiec -network create test 6`
 ## Converting to Docker
