@@ -822,13 +822,14 @@ void create_isolated_environment(FILE *bin_file, const char *bin_file_path,
 
   // Format the size to two decimal places
   snprintf(create_disk_command, sizeof(create_disk_command),
-           "hdiutil create -size %.2fg -fs HFS+ -volname \"%s\" %s", size_in_gb,
-           bin_file_path, disk_image_path);
+           "diskutil image create blank --size %.2fg --fs APFS "
+           "--volumeName \"%s\" %s",
+           size_in_gb, bin_file_path, disk_image_path);
   system(create_disk_command);
   chmod(disk_image_path, 0644); // rw-r--r--
 
   char mount_command[MAX_COMMAND_LEN];
-  snprintf(mount_command, sizeof(mount_command), "hdiutil attach %s",
+  snprintf(mount_command, sizeof(mount_command), "diskutil image attach %s",
            disk_image_path);
   system(mount_command);
 
@@ -1312,15 +1313,16 @@ void ocreate_isolated_environment(FILE *bin_file, const char *bin_file_path) {
 
   // Format the size to two decimal places
   snprintf(create_disk_command, sizeof(create_disk_command),
-           "hdiutil create -size %.2fg -fs HFS+ -volname \"%s\" %s", size_in_gb,
-           bin_file_path, disk_image_path);
+           "diskutil image create blank --size %.2fg --fs APFS "
+           "--volumeName \"%s\" %s",
+           size_in_gb, bin_file_path, disk_image_path);
 
   system(create_disk_command);
 
   chmod(disk_image_path, 0644);
 
   char mount_command[MAX_COMMAND_LEN];
-  snprintf(mount_command, sizeof(mount_command), "hdiutil attach %s",
+  snprintf(mount_command, sizeof(mount_command), "diskutil image attach %s",
            disk_image_path);
   system(mount_command);
 
@@ -1958,7 +1960,7 @@ void deploy_container(const char *config_file, int deploy_port) {
 void detach_container_images(const char *volume_name) {
   printf("Detaching %s Containers\n", volume_name);
   char command[MAX_PATH_LEN];
-  snprintf(command, sizeof(command), "hdiutil detach -force /Volumes/%s",
+  snprintf(command, sizeof(command), "diskutil eject -force /Volumes/%s",
            volume_name);
   int result = system(command);
   if (result == 0) {
