@@ -57,7 +57,19 @@ void execute_command(const char *command, const char *container_root) {
   container_state.last_executed_command[MAX_COMMAND_LEN - 1] = '\0';
 
   if (strncmp(command, "cd ", 3) == 0) {
-    const char *new_dir = command + 3;
+    // Trim stray spaces around the target, otherwise realpath() fails
+    // and a perfectly valid "cd shared" gets rejected
+    char dir_buf[PATH_MAX];
+    strncpy(dir_buf, command + 3, sizeof(dir_buf) - 1);
+    dir_buf[sizeof(dir_buf) - 1] = '\0';
+    char *dir_start = dir_buf;
+    while (isspace((unsigned char)*dir_start))
+      dir_start++;
+    char *dir_end = dir_start + strlen(dir_start);
+    while (dir_end > dir_start && isspace((unsigned char)*(dir_end - 1)))
+      dir_end--;
+    *dir_end = '\0';
+    const char *new_dir = dir_start;
 
     if (container_root != NULL) {
       const char shared_folder_path[] = "/Volumes/SharedContainer";
