@@ -1,6 +1,6 @@
 #!/bin/bash
 
-OSXIEC_VERSION="1.1.2"
+OSXIEC_VERSION="1.1.3"
 
 if [ "$EUID" -ne 0 ]; then
   echo "Please run as root or use sudo"
